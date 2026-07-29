@@ -587,6 +587,7 @@ const createHubWindow = () => {
     }
 
     hubWindow = new BrowserWindow({
+        title: 'DAW-fi',
         width: 1320,
         height: 860,
         minWidth: 1040,
@@ -652,6 +653,7 @@ const createEditorWindow = (request = {}) => {
 
     const windowIcon = getWindowIcon();
     editorWindow = new BrowserWindow({
+        title: 'DAW-fi',
         width: 1400,
         height: 900,
         minWidth: 1120,

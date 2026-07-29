@@ -12,7 +12,7 @@ export function DesktopWindowChrome() {
     <div className="desktop-titlebar">
       <div className="desktop-titlebar__brand" style={{ WebkitAppRegion: 'drag' } as AppRegionStyle}>
         <AppLogo size={20} />
-        <span className="desktop-titlebar__label">HOLLOW bits ecosystem</span>
+        <span className="desktop-titlebar__label">DAW-fi</span>
       </div>
       <div className="desktop-titlebar__actions" style={{ WebkitAppRegion: 'no-drag' } as AppRegionStyle}>
         <button className="desktop-window-btn" onClick={() => platformService.minimize()} title="Minimizar">

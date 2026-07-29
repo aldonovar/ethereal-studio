@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=DAW-fi
+GenericName=Digital Audio Workstation
+Comment=Estacion de trabajo de audio local-first
+Exec=/home/aldonovar/.local/bin/daw-fi
+TryExec=/home/aldonovar/.local/bin/daw-fi
+Icon=/home/aldonovar/Proyectos/hollow-bpm/dawfi-relaunch/build/icon.png
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+Keywords=DAW;audio;music;recording;DAW-fi;
+StartupNotify=true
+StartupWMClass=electron
