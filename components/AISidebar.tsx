@@ -1,7 +1,12 @@
 
 import React, { useState } from 'react';
 import { Sparkles, X, Music2, Loader2, Mic2, BarChart3, Bot } from 'lucide-react';
-import { generatePattern, analyzeMix } from '../services/geminiService';
+import {
+    analyzeMix,
+    generatePattern,
+    getAiGatewayStatus,
+    isAiGatewayError
+} from '../services/aiGatewayService';
 import { Note, Track } from '../types';
 
 interface AISidebarProps {
@@ -23,6 +28,13 @@ const AISidebar: React.FC<AISidebarProps> = ({ isOpen, onClose, onPatternGenerat
     const [loading, setLoading] = useState(false);
     const [mixAdvice, setMixAdvice] = useState<string | null>(null);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const aiGatewayStatus = getAiGatewayStatus();
+
+    const describeAiError = (error: unknown) => (
+        isAiGatewayError(error)
+            ? error.message
+            : 'El asistente IA no pudo completar la operacion. Intenta nuevamente mas tarde.'
+    );
 
     const handleGenerate = async () => {
         if (!prompt.trim()) return;
@@ -39,8 +51,7 @@ const AISidebar: React.FC<AISidebarProps> = ({ isOpen, onClose, onPatternGenerat
 
             setErrorMessage('No se pudo generar un patron valido. Ajusta el prompt e intenta nuevamente.');
         } catch (error) {
-            console.error('AI pattern generation failed', error);
-            setErrorMessage('La generacion AI fallo. Revisa conexion/API key e intenta de nuevo.');
+            setErrorMessage(describeAiError(error));
         } finally {
             setLoading(false);
         }
@@ -56,8 +67,7 @@ const AISidebar: React.FC<AISidebarProps> = ({ isOpen, onClose, onPatternGenerat
                 setErrorMessage('No se pudo generar analisis de mezcla en este intento.');
             }
         } catch (error) {
-            console.error('AI mix analysis failed', error);
-            setErrorMessage('El analisis AI no pudo completarse.');
+            setErrorMessage(describeAiError(error));
         } finally {
             setLoading(false);
         }
@@ -104,6 +114,15 @@ const AISidebar: React.FC<AISidebarProps> = ({ isOpen, onClose, onPatternGenerat
 
             <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
 
+                {!aiGatewayStatus.available && (
+                    <div
+                        className="mb-4 text-[10px] text-amber-200 bg-amber-500/10 border border-amber-500/25 rounded-sm px-3 py-2"
+                        role="status"
+                    >
+                        {aiGatewayStatus.message} El proyecto local y el motor de audio siguen disponibles.
+                    </div>
+                )}
+
                 {activeTab === 'generate' ? (
                     <div className="space-y-4">
                         <div className="bg-[#18181b] p-3 rounded-sm border border-white/5">
@@ -124,7 +143,7 @@ const AISidebar: React.FC<AISidebarProps> = ({ isOpen, onClose, onPatternGenerat
                         )}
 
                         <button
-                            disabled={loading}
+                            disabled={loading || !aiGatewayStatus.available}
                             onClick={handleGenerate}
                             className="w-full bg-daw-accent hover:bg-daw-cyan hover:text-black text-black font-bold py-3 rounded-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50 shadow-[0_0_15px_rgba(59,249,246,0.2)]"
                         >
@@ -191,7 +210,7 @@ const AISidebar: React.FC<AISidebarProps> = ({ isOpen, onClose, onPatternGenerat
 
                         {!mixAdvice && (
                             <button
-                                disabled={loading}
+                                disabled={loading || !aiGatewayStatus.available}
                                 onClick={handleAnalyzeMix}
                                 className="w-full bg-daw-ruby hover:bg-red-500 text-white font-bold py-3 rounded-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50 shadow-[0_0_15px_rgba(244,63,94,0.2)] mt-auto"
                             >
