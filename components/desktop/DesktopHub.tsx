@@ -35,7 +35,7 @@ import {
 } from 'lucide-react';
 import AppLogo from '../AppLogo';
 import { platformService } from '../../services/platformService';
-import { supabase } from '../../services/supabase';
+import { isSupabaseConfigured, supabase } from '../../services/supabase';
 import { useAuthStore } from '../../stores/authStore';
 import type { Database, Project } from '../../types/supabase';
 
@@ -789,7 +789,7 @@ export function DesktopHub({ refreshSignal, onLogin, onSettings, onSignup }: Des
         <div className="desktop-empty">
           <div>
             <div className="desktop-spinner" />
-            <p>Cargando ecosistema Hollow Bits...</p>
+            <p>Cargando DAW-fi...</p>
           </div>
         </div>
       </main>
@@ -883,8 +883,8 @@ export function DesktopHub({ refreshSignal, onLogin, onSettings, onSignup }: Des
             </>
           ) : (
             <>
-              <button className="desktop-btn" onClick={onLogin}>Login</button>
-              <button className="desktop-btn desktop-btn--primary" onClick={onSignup}>Cuenta</button>
+              <button className="desktop-btn" onClick={onLogin} disabled={!isSupabaseConfigured}>Login</button>
+              <button className="desktop-btn desktop-btn--primary" onClick={onSignup} disabled={!isSupabaseConfigured}>Cuenta</button>
             </>
           )}
         </div>
@@ -893,7 +893,7 @@ export function DesktopHub({ refreshSignal, onLogin, onSettings, onSignup }: Des
       <section className="desktop-hub-main">
         <header className="desktop-hub-command">
           <div>
-            <p className="desktop-command-kicker">Hollow Bits Ecosystem</p>
+            <p className="desktop-command-kicker">DAW-fi</p>
             <h1>Studio Hub</h1>
           </div>
           <div className="desktop-command-actions">
@@ -914,11 +914,15 @@ export function DesktopHub({ refreshSignal, onLogin, onSettings, onSignup }: Des
           <section className="desktop-guest-hero">
             <AppLogo size={62} withGlow />
             <div>
-              <h2>Hub cloud sin cuenta activa</h2>
-              <p>Editor local disponible. Proyectos, equipos, licencia y notificaciones requieren sesion.</p>
+              <h2>{isSupabaseConfigured ? 'Hub cloud sin cuenta activa' : 'DAW-fi en modo local'}</h2>
+              <p>
+                {isSupabaseConfigured
+                  ? 'Editor local disponible. Proyectos, equipos, licencia y notificaciones requieren sesión.'
+                  : 'El editor y los proyectos locales están disponibles. La nube no está configurada en este build.'}
+              </p>
               <div className="desktop-actions">
                 <button className="desktop-btn" onClick={() => openEditor()}><CloudOff size={15} /> Editor local</button>
-                <button className="desktop-btn desktop-btn--primary" onClick={onLogin}>Conectar cuenta</button>
+                <button className="desktop-btn desktop-btn--primary" onClick={onLogin} disabled={!isSupabaseConfigured}>Conectar cuenta</button>
               </div>
             </div>
           </section>

@@ -4,9 +4,21 @@ import type { Database } from '../types/supabase';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Missing Supabase environment variables: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY');
-}
+export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+
+// The desktop app is local-first. Missing cloud configuration must never stop
+// React from mounting, and an offline build must never send auth data to a
+// fallback endpoint. This fetch implementation returns a local 503 response.
+const offlineCloudFetch: typeof fetch = async () => new Response(
+  JSON.stringify({ message: 'Cloud services are not configured in this build.' }),
+  {
+    status: 503,
+    headers: { 'Content-Type': 'application/json' },
+  }
+);
+
+const runtimeSupabaseUrl = supabaseUrl || 'http://127.0.0.1:1';
+const runtimeSupabaseAnonKey = supabaseAnonKey || 'dawfi-local-only';
 
 const isOnHollowbits = typeof window !== 'undefined'
   && window.location.hostname.includes('hollowbits.com');
@@ -91,11 +103,12 @@ const ssoStorage = {
   },
 };
 
-export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey, {
+export const supabase = createClient<Database>(runtimeSupabaseUrl, runtimeSupabaseAnonKey, {
   auth: {
     storage: ssoStorage,
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: true,
+    autoRefreshToken: isSupabaseConfigured,
+    persistSession: isSupabaseConfigured,
+    detectSessionInUrl: isSupabaseConfigured,
   },
+  ...(!isSupabaseConfigured ? { global: { fetch: offlineCloudFetch } } : {}),
 });

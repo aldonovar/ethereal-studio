@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { AuthChangeEvent, Session, User } from '@supabase/supabase-js';
-import { supabase } from '../services/supabase';
+import { isSupabaseConfigured, supabase } from '../services/supabase';
 import type { Profile } from '../types/supabase';
 
 interface AuthState {
@@ -46,7 +46,7 @@ async function safeMfaCheck(): Promise<boolean> {
 }
 
 async function exchangeSessionFromCallback(url: string): Promise<Session | null> {
-  if (!url) return null;
+  if (!url || !isSupabaseConfigured) return null;
 
   const parsed = new URL(url);
   const errorDescription = parsed.searchParams.get('error_description') || parsed.searchParams.get('error');
@@ -107,6 +107,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   requiresMfa: false,
 
   initialize: () => {
+    if (!isSupabaseConfigured) {
+      const hash = window.location.hash;
+      if (hash.includes('access_token=') || hash.includes('refresh_token=')) {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+      set({ session: null, user: null, profile: null, requiresMfa: false, isLoading: false });
+      return () => undefined;
+    }
+
     const safetyTimeout = window.setTimeout(() => {
       if (get().isLoading) {
         console.warn('[authStore] Safety timeout - forcing isLoading=false');
@@ -165,6 +174,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   signOut: async () => {
     set({ isLoading: true });
+    if (!isSupabaseConfigured) {
+      set({ session: null, user: null, profile: null, requiresMfa: false, isLoading: false });
+      return;
+    }
     try {
       const { error } = await supabase.auth.signOut();
       if (error) {
@@ -189,6 +202,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   handleAuthCallback: async (url: string) => {
+    if (!isSupabaseConfigured) {
+      set({ session: null, user: null, profile: null, requiresMfa: false, isLoading: false });
+      return false;
+    }
     set({ isLoading: true });
     try {
       const session = await exchangeSessionFromCallback(url);
