@@ -1,0 +1,6 @@
+[mcp_servers.supabase_dawfi_aldonovar]
+url = "https://mcp.supabase.com/mcp?project_ref=xnmkoybfuyivmiuckpxs&read_only=true&features=database,debugging,development,docs"
+auth = "oauth"
+enabled = true
+required = false
+default_tools_approval_mode = "writes"
