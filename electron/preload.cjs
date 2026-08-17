@@ -17,8 +17,12 @@ contextBridge.exposeInMainWorld('electron', {
     openEditor: (request) => ipcRenderer.invoke('desktop-open-editor', request),
     showHub: () => ipcRenderer.invoke('desktop-show-hub'),
     openDesktopAuth: (request) => ipcRenderer.invoke('desktop-open-auth', request),
+    cancelDesktopAuth: () => ipcRenderer.invoke('desktop-cancel-auth'),
     openExternalUrl: (url) => ipcRenderer.invoke('desktop-open-external-url', url),
     getPendingAuthCallback: () => ipcRenderer.invoke('desktop-get-pending-auth-callback'),
+    getPersistedAuthSession: () => ipcRenderer.invoke('desktop-get-auth-session'),
+    persistAuthSession: (session) => ipcRenderer.invoke('desktop-persist-auth-session', session),
+    clearPersistedAuthSession: () => ipcRenderer.invoke('desktop-clear-auth-session'),
     onAuthCallback: (callback) => {
         const handler = (_event, payload) => {
             callback(payload);

@@ -11,6 +11,7 @@
     "assets:performer": "python scripts/generate-performer-frames.py",
     "assets:performer:ffmpeg": "node scripts/generate-performer-frames.mjs",
     "test:contract": "node scripts/verify-ecosystem-contract.mjs",
+    "test:auth-hardening": "vitest run tests/unit/desktopAuthOAuth.test.ts && node scripts/verify-desktop-auth-hardening.mjs",
     "test:security:client": "node scripts/verify-client-bundle-security.mjs",
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run",
@@ -39,7 +40,7 @@
     "release:readiness": "node scripts/release-readiness-report.mjs --out benchmarks/release-readiness/latest-report.json",
     "quality:live-strict": "npm run typecheck && npm run test:unit && npm run build && npm run capture:live:48x8 && npm run transport:gate && npm run launch:gate:strict -- --report benchmarks/session-launch/latest-report.json --out benchmarks/session-launch/latest-gate.json && npm run stress:48x8:gate:strict -- --report benchmarks/stress-48x8/latest-report.json && npm run recording:cycles:gate && npm run monitoring:gate && npm run block5:gate && npm run block6:gate && npm run block7:gate && npm run audio-priority:gate && npm run release:readiness",
     "perf:gate": "node scripts/audio-performance-gate.mjs",
-    "quality:gates": "npm run typecheck && npm run test:unit && npm run build && npm run test:security:client",
+    "quality:gates": "npm run typecheck && npm run test:unit && npm run test:auth-hardening && npm run build && npm run test:security:client",
     "build": "tsc && vite build",
     "build:win": "npm run build && electron-builder --win --x64 --publish never",
     "preview": "vite preview",
@@ -92,6 +93,15 @@
     "extraMetadata": {
       "main": "electron/main.cjs"
     },
+    "protocols": [
+      {
+        "name": "DAW-fi Authentication",
+        "schemes": [
+          "dawfi",
+          "hollowbits"
+        ]
+      }
+    ],
     "win": {
       "signAndEditExecutable": false,
       "target": [

@@ -587,11 +587,35 @@ export interface DesktopAuthRequest {
   prompt?: 'select_account' | 'none';
 }
 
+export type DesktopAuthErrorCode =
+  | 'AUTH_GOOGLE_PROVIDER_DISABLED'
+  | 'AUTH_REDIRECT_NOT_ALLOWED'
+  | 'AUTH_CALLBACK_INVALID'
+  | 'AUTH_STATE_MISMATCH'
+  | 'AUTH_DESKTOP_HANDOFF_EXPIRED'
+  | 'AUTH_DESKTOP_HANDOFF_REPLAYED'
+  | 'AUTH_NETWORK_UNAVAILABLE'
+  | 'AUTH_CONFIGURATION_MISSING'
+  | 'AUTH_USER_CANCELLED';
+
+export interface DesktopAuthSessionPayload {
+  access_token: string;
+  refresh_token: string;
+  expires_in?: number;
+  expires_at?: number;
+  token_type?: string;
+}
+
 export interface DesktopAuthLaunchResult {
   success: boolean;
-  url?: string;
-  state?: string;
+  requestId?: string;
+  persistence?: 'encrypted' | 'memory';
+  errorCode?: DesktopAuthErrorCode;
   error?: string;
+}
+
+export interface DesktopAuthCallbackResult extends DesktopAuthLaunchResult {
+  session?: DesktopAuthSessionPayload;
 }
 
 export interface DesktopHostAPI {
@@ -603,9 +627,13 @@ export interface DesktopHostAPI {
   openEditor?: (request?: DesktopOpenEditorRequest) => Promise<{ success: boolean; error?: string }>;
   showHub?: () => Promise<{ success: boolean; error?: string }>;
   openDesktopAuth?: (request?: DesktopAuthRequest) => Promise<DesktopAuthLaunchResult>;
+  cancelDesktopAuth?: () => Promise<{ success: boolean; error?: string }>;
   openExternalUrl?: (url: string) => Promise<{ success: boolean; error?: string }>;
-  getPendingAuthCallback?: () => Promise<string | null>;
-  onAuthCallback?: (callback: (url: string) => void) => (() => void);
+  getPendingAuthCallback?: () => Promise<DesktopAuthCallbackResult | null>;
+  onAuthCallback?: (callback: (result: DesktopAuthCallbackResult) => void) => (() => void);
+  getPersistedAuthSession?: () => Promise<DesktopAuthSessionPayload | null>;
+  persistAuthSession?: (session: DesktopAuthSessionPayload) => Promise<DesktopAuthLaunchResult>;
+  clearPersistedAuthSession?: () => Promise<{ success: boolean; error?: string }>;
   onHubRefresh?: (callback: () => void) => (() => void);
   selectFiles: () => Promise<FileData[]>;
   readFileFromPath?: (filePath: string) => Promise<FileData | null>;

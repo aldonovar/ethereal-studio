@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -10,6 +10,15 @@ const {
     resolveBenchmarkArtifactPath,
     sanitizeBenchmarkStatus
 } = require('./benchmarkBridge.cjs');
+const {
+    DesktopAuthError,
+    createAuthorizationRequest,
+    exchangeAuthorizationCode,
+    parseAuthorizationCallback,
+    parseTokenResponse,
+    toPublicAuthError,
+    validatePendingRequest
+} = require('./desktop-auth.cjs');
 
 const AUDIO_FORMATS = new Set(['wav', 'aiff', 'flac', 'mp3']);
 const AUDIO_MIME_BY_FORMAT = {
@@ -103,7 +112,9 @@ let mainWindow = null;
 let hubWindow = null;
 let editorWindow = null;
 let pendingAuthCallbackUrl = null;
-let pendingAuthState = null;
+let pendingAuthCallbackResult = null;
+let pendingDesktopAuthRequest = null;
+let volatileDesktopAuthSession = null;
 const liveBenchmarkConfig = parseLiveCaptureConfig(process.argv, process.env);
 const liveBenchmarkRuntime = {
     enabled: Boolean(liveBenchmarkConfig),
@@ -726,62 +737,230 @@ const createEditorWindow = (request = {}) => {
     return editorWindow;
 };
 
-const AUTH_PROTOCOL = 'hollowbits';
-const DESKTOP_AUTH_BRIDGE_URL = 'https://hollowbits.com/desktop-auth';
+const AUTH_PROTOCOL = 'dawfi';
+const LEGACY_AUTH_PROTOCOL = 'hollowbits';
+const DESKTOP_AUTH_REDIRECT_URI = `${AUTH_PROTOCOL}://auth/callback`;
+const DESKTOP_AUTH_SUPABASE_URL = process.env.DAWFI_SUPABASE_URL
+    || process.env.VITE_SUPABASE_URL
+    || 'https://xnmkoybfuyivmiuckpxs.supabase.co';
+const DESKTOP_AUTH_CLIENT_ID = process.env.DAWFI_DESKTOP_OAUTH_CLIENT_ID || '';
+const AUTH_PENDING_FILE = 'desktop-auth-pending.bin';
+const AUTH_SESSION_FILE = 'desktop-auth-session.bin';
+const AUTH_REQUEST_TIMEOUT_MS = 15_000;
+const consumedAuthStates = new Map();
 
-const findAuthCallbackUrl = (argv) => {
-    if (!Array.isArray(argv)) return null;
-    return argv.find((entry) => typeof entry === 'string' && entry.startsWith(`${AUTH_PROTOCOL}://`)) || null;
+const isSecureStorageAvailable = () => {
+    if (!safeStorage.isEncryptionAvailable()) return false;
+    if (typeof safeStorage.getSelectedStorageBackend === 'function') {
+        return safeStorage.getSelectedStorageBackend() !== 'basic_text';
+    }
+    return true;
 };
 
-const getAuthCallbackState = (url) => {
+const getAuthRecordPath = (filename) => path.join(app.getPath('userData'), filename);
+
+const writeEncryptedAuthRecord = async (filename, payload) => {
+    if (!isSecureStorageAvailable()) return false;
+    const encrypted = safeStorage.encryptString(JSON.stringify(payload));
+    const filePath = getAuthRecordPath(filename);
+    await fs.writeFile(filePath, encrypted, { mode: 0o600 });
+    await fs.chmod(filePath, 0o600).catch(() => undefined);
+    return true;
+};
+
+const readEncryptedAuthRecord = async (filename) => {
+    if (!isSecureStorageAvailable()) return null;
     try {
-        const parsed = new URL(url);
-        const hashParams = new URLSearchParams(parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash);
-        return hashParams.get('desktop_state') || parsed.searchParams.get('desktop_state') || parsed.searchParams.get('state') || null;
-    } catch {
+        const encrypted = await fs.readFile(getAuthRecordPath(filename));
+        return JSON.parse(safeStorage.decryptString(encrypted));
+    } catch (error) {
+        if (error?.code !== 'ENOENT') {
+            await fs.unlink(getAuthRecordPath(filename)).catch(() => undefined);
+        }
         return null;
     }
 };
 
-const createDesktopAuthBridgeUrl = (request) => {
-    const state = crypto.randomBytes(18).toString('base64url');
-    pendingAuthState = state;
+const removeAuthRecord = async (filename) => {
+    await fs.unlink(getAuthRecordPath(filename)).catch((error) => {
+        if (error?.code !== 'ENOENT') throw error;
+    });
+};
 
-    const returnTo = new URL(`${AUTH_PROTOCOL}://auth/callback`);
-    returnTo.searchParams.set('desktop_state', state);
+const persistPendingAuthRequest = async (request) => {
+    pendingDesktopAuthRequest = request;
+    await writeEncryptedAuthRecord(AUTH_PENDING_FILE, { version: 1, request });
+};
 
-    const bridgeUrl = new URL(DESKTOP_AUTH_BRIDGE_URL);
-    bridgeUrl.searchParams.set('source', 'desktop');
-    bridgeUrl.searchParams.set('mode', request?.mode === 'signup' ? 'signup' : 'login');
-    bridgeUrl.searchParams.set('state', state);
-    bridgeUrl.searchParams.set('return_to', returnTo.toString());
-    if (request?.prompt === 'none' || request?.prompt === 'select_account') {
-        bridgeUrl.searchParams.set('prompt', request.prompt);
+const readPendingAuthRequest = async () => {
+    if (pendingDesktopAuthRequest) return pendingDesktopAuthRequest;
+    const record = await readEncryptedAuthRecord(AUTH_PENDING_FILE);
+    const request = record?.version === 1 ? record.request : null;
+    if (!request) return null;
+    try {
+        validatePendingRequest(request);
+        pendingDesktopAuthRequest = request;
+        return request;
+    } catch {
+        await removeAuthRecord(AUTH_PENDING_FILE);
+        return null;
+    }
+};
+
+const clearPendingAuthRequest = async () => {
+    pendingDesktopAuthRequest = null;
+    await removeAuthRecord(AUTH_PENDING_FILE);
+};
+
+const normalizeDesktopSession = (session) => parseTokenResponse({
+    access_token: session?.access_token,
+    refresh_token: session?.refresh_token,
+    expires_in: session?.expires_in || 3600,
+    token_type: session?.token_type || 'bearer'
+});
+
+const persistDesktopAuthSession = async (session) => {
+    const normalized = normalizeDesktopSession(session);
+    volatileDesktopAuthSession = normalized;
+    const encrypted = await writeEncryptedAuthRecord(AUTH_SESSION_FILE, {
+        version: 1,
+        session: normalized
+    });
+    return { session: normalized, persistence: encrypted ? 'encrypted' : 'memory' };
+};
+
+const readDesktopAuthSession = async () => {
+    if (volatileDesktopAuthSession) return volatileDesktopAuthSession;
+    const record = await readEncryptedAuthRecord(AUTH_SESSION_FILE);
+    if (record?.version !== 1 || !record.session) return null;
+    try {
+        volatileDesktopAuthSession = normalizeDesktopSession(record.session);
+        return volatileDesktopAuthSession;
+    } catch {
+        await removeAuthRecord(AUTH_SESSION_FILE);
+        return null;
+    }
+};
+
+const clearDesktopAuthSession = async () => {
+    volatileDesktopAuthSession = null;
+    await removeAuthRecord(AUTH_SESSION_FILE);
+};
+
+const findAuthCallbackUrl = (argv) => {
+    if (!Array.isArray(argv)) return null;
+    return argv.find((entry) => (
+        typeof entry === 'string'
+        && (entry.startsWith(`${AUTH_PROTOCOL}://`) || entry.startsWith(`${LEGACY_AUTH_PROTOCOL}://`))
+    )) || null;
+};
+
+const digestAuthState = (state) => crypto.createHash('sha256').update(state, 'utf8').digest('hex');
+
+const pruneConsumedAuthStates = () => {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [digest, consumedAt] of consumedAuthStates.entries()) {
+        if (consumedAt < cutoff) consumedAuthStates.delete(digest);
+    }
+};
+
+const readCallbackState = (rawUrl) => {
+    try {
+        const parsed = new URL(rawUrl);
+        return parsed.searchParams.get('state') || '';
+    } catch {
+        return '';
+    }
+};
+
+const sendDesktopAuthResult = (payload) => {
+    pendingAuthCallbackResult = payload;
+    const target = hubWindow && !hubWindow.isDestroyed() ? hubWindow : createHubWindow();
+    if (!target || target.isDestroyed()) return;
+    if (!target.isVisible()) target.show();
+    target.focus();
+    target.webContents.send('desktop-auth-callback', payload);
+};
+
+const processAuthCallback = async (rawUrl) => {
+    pruneConsumedAuthStates();
+    const pending = await readPendingAuthRequest();
+    if (!pending) {
+        const callbackState = readCallbackState(rawUrl);
+        const replayed = callbackState && consumedAuthStates.has(digestAuthState(callbackState));
+        sendDesktopAuthResult({
+            success: false,
+            errorCode: replayed ? 'AUTH_DESKTOP_HANDOFF_REPLAYED' : 'AUTH_CALLBACK_INVALID',
+            error: replayed
+                ? 'Este código de acceso ya fue utilizado.'
+                : 'No existe una solicitud de acceso pendiente.'
+        });
+        return;
     }
 
-    return { url: bridgeUrl.toString(), state };
+    try {
+        validatePendingRequest(pending);
+        const parsed = parseAuthorizationCallback(rawUrl, {
+            expectedState: pending.state,
+            redirectUri: pending.redirectUri
+        });
+
+        if (parsed.kind === 'error') {
+            consumedAuthStates.set(digestAuthState(pending.state), Date.now());
+            await clearPendingAuthRequest();
+            sendDesktopAuthResult({
+                success: false,
+                requestId: pending.requestId,
+                errorCode: parsed.code,
+                error: parsed.message
+            });
+            return;
+        }
+
+        consumedAuthStates.set(digestAuthState(pending.state), Date.now());
+        await clearPendingAuthRequest();
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
+        let session;
+        try {
+            session = await exchangeAuthorizationCode({
+                pending,
+                code: parsed.code,
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timeout);
+        }
+
+        const persisted = await persistDesktopAuthSession(session);
+        sendDesktopAuthResult({
+            success: true,
+            requestId: pending.requestId,
+            session: persisted.session,
+            persistence: persisted.persistence
+        });
+    } catch (error) {
+        const publicError = toPublicAuthError(error);
+        if (publicError.code === 'AUTH_DESKTOP_HANDOFF_EXPIRED') {
+            await clearPendingAuthRequest();
+        }
+        sendDesktopAuthResult({
+            success: false,
+            requestId: pending.requestId,
+            errorCode: publicError.code,
+            error: publicError.message
+        });
+    }
 };
 
 const deliverAuthCallback = (url) => {
     if (!url) return;
-    const callbackState = getAuthCallbackState(url);
-    if (pendingAuthState && callbackState && callbackState !== pendingAuthState) {
-        console.warn('[auth] Ignoring desktop auth callback with mismatched state.');
+    if (!app.isReady()) {
+        pendingAuthCallbackUrl = url;
         return;
     }
-    if (callbackState && callbackState === pendingAuthState) {
-        pendingAuthState = null;
-    }
-
-    pendingAuthCallbackUrl = url;
-    if (!app.isReady()) return;
-    const target = hubWindow && !hubWindow.isDestroyed() ? hubWindow : createHubWindow();
-    if (target && !target.isDestroyed()) {
-        if (!target.isVisible()) target.show();
-        target.focus();
-        target.webContents.send('desktop-auth-callback', url);
-    }
+    void processAuthCallback(url);
 };
 
 ipcMain.handle('desktop-open-editor', async (_event, request) => {
@@ -812,14 +991,38 @@ ipcMain.handle('desktop-show-hub', async () => {
 
 ipcMain.handle('desktop-open-auth', async (_event, request) => {
     try {
-        const authRequest = createDesktopAuthBridgeUrl(request || {});
+        const authRequest = createAuthorizationRequest({
+            supabaseUrl: DESKTOP_AUTH_SUPABASE_URL,
+            clientId: DESKTOP_AUTH_CLIENT_ID,
+            redirectUri: DESKTOP_AUTH_REDIRECT_URI
+        });
+        const pending = {
+            ...authRequest,
+            url: undefined,
+            requestId: crypto.randomUUID(),
+            mode: request?.mode === 'signup' ? 'signup' : 'login'
+        };
+        await persistPendingAuthRequest(pending);
         await shell.openExternal(authRequest.url);
-        return { success: true, ...authRequest };
+        return {
+            success: true,
+            requestId: pending.requestId,
+            persistence: isSecureStorageAvailable() ? 'encrypted' : 'memory'
+        };
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logMainError('desktop-open-auth', message);
-        return { success: false, error: message };
+        await clearPendingAuthRequest().catch(() => undefined);
+        const publicError = toPublicAuthError(error);
+        return {
+            success: false,
+            errorCode: publicError.code,
+            error: publicError.message
+        };
     }
+});
+
+ipcMain.handle('desktop-cancel-auth', async () => {
+    await clearPendingAuthRequest();
+    return { success: true };
 });
 
 ipcMain.handle('desktop-open-external-url', async (_event, rawUrl) => {
@@ -838,9 +1041,29 @@ ipcMain.handle('desktop-open-external-url', async (_event, rawUrl) => {
 });
 
 ipcMain.handle('desktop-get-pending-auth-callback', async () => {
-    const url = pendingAuthCallbackUrl;
-    pendingAuthCallbackUrl = null;
-    return url;
+    const result = pendingAuthCallbackResult;
+    pendingAuthCallbackResult = null;
+    return result;
+});
+
+ipcMain.handle('desktop-get-auth-session', async () => readDesktopAuthSession());
+
+ipcMain.handle('desktop-persist-auth-session', async (_event, session) => {
+    try {
+        const persisted = await persistDesktopAuthSession(session);
+        return { success: true, persistence: persisted.persistence };
+    } catch {
+        return {
+            success: false,
+            errorCode: 'AUTH_CALLBACK_INVALID',
+            error: 'La sesión recibida no es válida.'
+        };
+    }
+});
+
+ipcMain.handle('desktop-clear-auth-session', async () => {
+    await clearDesktopAuthSession();
+    return { success: true };
 });
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -865,8 +1088,10 @@ app.on('open-url', (event, url) => {
 app.whenReady().then(() => {
     if (process.defaultApp) {
         app.setAsDefaultProtocolClient(AUTH_PROTOCOL, process.execPath, [path.resolve(process.argv[1] || '')]);
+        app.setAsDefaultProtocolClient(LEGACY_AUTH_PROTOCOL, process.execPath, [path.resolve(process.argv[1] || '')]);
     } else {
         app.setAsDefaultProtocolClient(AUTH_PROTOCOL);
+        app.setAsDefaultProtocolClient(LEGACY_AUTH_PROTOCOL);
     }
 
     const initialAuthCallback = findAuthCallbackUrl(process.argv);
@@ -878,6 +1103,12 @@ app.whenReady().then(() => {
         createEditorWindow();
     } else {
         createHubWindow();
+    }
+
+    if (pendingAuthCallbackUrl) {
+        const callbackUrl = pendingAuthCallbackUrl;
+        pendingAuthCallbackUrl = null;
+        void processAuthCallback(callbackUrl);
     }
 
     app.on('activate', () => {

@@ -20,95 +20,59 @@ const offlineCloudFetch: typeof fetch = async () => new Response(
 const runtimeSupabaseUrl = supabaseUrl || 'http://127.0.0.1:1';
 const runtimeSupabaseAnonKey = supabaseAnonKey || 'dawfi-local-only';
 
-const isOnHollowbits = typeof window !== 'undefined'
-  && window.location.hostname.includes('hollowbits.com');
+const isElectronRenderer = typeof window !== 'undefined' && Boolean(window.electron);
+const volatileDesktopStorage = new Map<string, string>();
 
-const COOKIE_DOMAIN = 'domain=.hollowbits.com;';
-const COOKIE_OPTS = 'path=/; max-age=604800; SameSite=Lax; Secure';
-
-function setCookie(name: string, value: string): void {
-  const domainPart = isOnHollowbits ? COOKIE_DOMAIN : '';
-  document.cookie = `${name}=${value}; ${domainPart} ${COOKIE_OPTS}`;
-}
-
-function getCookie(name: string): string | null {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = document.cookie.match(new RegExp('(?:^|; )' + escaped + '=([^;]*)'));
-  return match ? decodeURIComponent(match[1]) : null;
-}
-
-function deleteCookie(name: string): void {
-  const expired = 'expires=Thu, 01 Jan 1970 00:00:00 GMT';
-  document.cookie = `${name}=; path=/; ${expired}`;
-  if (isOnHollowbits) {
-    document.cookie = `${name}=; ${COOKIE_DOMAIN} path=/; ${expired}`;
-  }
-}
-
-const ssoStorage = {
+// Electron never persists a Supabase session in localStorage or a JavaScript
+// cookie. The renderer keeps only a volatile copy while the main process owns
+// encrypted persistence through safeStorage.
+const runtimeAuthStorage = {
   getItem: (key: string): string | null => {
     if (typeof window === 'undefined') return null;
+    if (isElectronRenderer) return volatileDesktopStorage.get(key) || null;
 
     try {
-      const local = window.localStorage.getItem(key);
-      if (local) return local;
+      return window.localStorage.getItem(key);
     } catch {
-      // Private browsing and hardened environments can throw.
+      return null;
     }
-
-    if (typeof document !== 'undefined') {
-      const cookieValue = getCookie(key);
-      if (cookieValue) {
-        try {
-          window.localStorage.setItem(key, cookieValue);
-        } catch {
-          // Local persistence is best-effort.
-        }
-        return cookieValue;
-      }
-    }
-
-    return null;
   },
 
   setItem: (key: string, value: string): void => {
     if (typeof window === 'undefined') return;
+    if (isElectronRenderer) {
+      volatileDesktopStorage.set(key, value);
+      return;
+    }
 
     try {
       window.localStorage.setItem(key, value);
     } catch {
       // Local persistence is best-effort.
     }
-
-    if (isOnHollowbits && typeof document !== 'undefined') {
-      try {
-        const encoded = encodeURIComponent(value);
-        if (encoded.length <= 3900) {
-          setCookie(key, encoded);
-        }
-      } catch {
-        // Cookie SSO is secondary to localStorage.
-      }
-    }
   },
 
   removeItem: (key: string): void => {
     if (typeof window === 'undefined') return;
+    if (isElectronRenderer) {
+      volatileDesktopStorage.delete(key);
+      return;
+    }
     try {
       window.localStorage.removeItem(key);
     } catch {
       // Local persistence is best-effort.
     }
-    if (typeof document !== 'undefined') deleteCookie(key);
   },
 };
 
 export const supabase = createClient<Database>(runtimeSupabaseUrl, runtimeSupabaseAnonKey, {
   auth: {
-    storage: ssoStorage,
+    storage: runtimeAuthStorage,
     autoRefreshToken: isSupabaseConfigured,
     persistSession: isSupabaseConfigured,
-    detectSessionInUrl: isSupabaseConfigured,
+    detectSessionInUrl: false,
+    flowType: 'pkce',
   },
   ...(!isSupabaseConfigured ? { global: { fetch: offlineCloudFetch } } : {}),
 });

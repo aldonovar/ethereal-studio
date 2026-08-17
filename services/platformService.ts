@@ -134,6 +134,19 @@ class PlatformService {
     }
   }
 
+  public async cancelDesktopAuth(): Promise<boolean> {
+    const host = desktopRuntimeService.api;
+    if (!host?.cancelDesktopAuth) return false;
+
+    try {
+      const result = await host.cancelDesktopAuth();
+      return result.success;
+    } catch (error) {
+      console.error('Unable to cancel desktop auth', error);
+      return false;
+    }
+  }
+
   public async openExternalUrl(url: string): Promise<boolean> {
     const host = desktopRuntimeService.api;
     if (!host?.openExternalUrl) {
