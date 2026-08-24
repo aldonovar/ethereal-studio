@@ -25,20 +25,25 @@ const renderCinema = (overrides: Partial<React.ComponentProps<typeof PianoCinema
     }));
 };
 
-describe('PianoCinema premium presentation', () => {
-    it('renders a full-bleed scene and keyboard on the same horizontal coordinate system', () => {
+describe('PianoCinema workstation presentation', () => {
+    it('renders a restrained full-width scene and keyboard on the same horizontal coordinate system', () => {
         const markup = renderCinema();
 
-        expect(markup).toContain('data-piano-cinema="premium"');
+        expect(markup).toContain('data-piano-cinema="workstation"');
         expect(markup).toContain('data-piano-cinema-stage="true"');
-        expect(markup).toContain('data-piano-cinema-depth-grid="true"');
+        expect(markup).toContain('data-piano-cinema-surface="workstation"');
+        expect(markup).toContain('data-piano-cinema-lane-grid="true"');
+        expect(markup).toContain('data-piano-cinema-playhead="true"');
         expect(markup).toContain('data-piano-cinema-keyboard="true"');
         expect(markup.match(/preserveAspectRatio="none"/g)).toHaveLength(2);
         expect(markup).toContain('motion-reduce:transition-none');
-        expect(markup.match(/data-piano-cinema-note-trail="true"/g)).toHaveLength(NOTES.length);
+        expect(markup.match(/data-piano-cinema-note-body="true"/g)).toHaveLength(NOTES.length);
+        expect(markup).not.toContain('aurora');
+        expect(markup).not.toContain('active-glow');
+        expect(markup).not.toContain('data-piano-cinema-note-trail');
     });
 
-    it('expresses active and live pitches as reflected, illuminated keys', () => {
+    it('uses a subtle functional reflection for active and live pitches', () => {
         const markup = renderCinema({
             activeNoteIndexes: [1],
             livePitches: [76],
