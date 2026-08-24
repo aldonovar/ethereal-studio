@@ -20,6 +20,7 @@ const {
     validatePublishableKey,
     validatePendingRequest
 } = require('./desktop-auth.cjs');
+const { createAuthCallbackCoordinator } = require('./desktop-auth-callback-coordinator.cjs');
 const {
     SUPPORTED_AUDIO_IMPORT_EXTENSIONS,
     resolveFfmpegBinary,
@@ -27,10 +28,30 @@ const {
 } = require('./ffmpeg-runtime.cjs');
 const {
     MAX_AUDIO_IMPORT_FILE_BYTES,
-    assertAudioImportFileSize,
     assertAudioImportSelectionCount
 } = require('./audio-import-policy.cjs');
 const { createRendererVisibilityGuard } = require('./renderer-visibility-guard.cjs');
+const {
+    NativeBridgeSecurityError,
+    attachTrustedNavigation,
+    isTrustedRendererUrl,
+    requireTrustedIpcSender
+} = require('./native-bridge-security.cjs');
+const {
+    NativeFileGrantError,
+    NativeFileGrantManager
+} = require('./native-file-grants.cjs');
+const {
+    MAX_PROJECT_BUNDLE_BYTES,
+    ProjectBundleIoError,
+    ProjectBundleIoManager,
+    assertSha256,
+    sanitizeProjectBundleFileName
+} = require('./project-bundle-io.cjs');
+const {
+    getDesktopProductTitle,
+    normalizeDesktopEditorRequest
+} = require('./desktop-product-surface.cjs');
 
 const AUDIO_FORMATS = new Set(['wav', 'aiff', 'flac', 'mp3']);
 const AUDIO_MIME_BY_FORMAT = {
@@ -89,10 +110,20 @@ const runFfmpeg = (args) => runFfmpegProcess(ffmpegBinaryPath, args);
 const DIRECTORY_SCAN_LIMIT = 10000;
 const MAX_DIRECT_FILE_READ_BYTES = MAX_AUDIO_IMPORT_FILE_BYTES;
 const MAX_IMPORT_FILE_BYTES = MAX_AUDIO_IMPORT_FILE_BYTES;
+const projectBundleIo = new ProjectBundleIoManager();
+const nativeFileGrants = new NativeFileGrantManager({
+    audioExtensions: SUPPORTED_AUDIO_IMPORT_EXTENSIONS,
+    scanExtensions: [...SUPPORTED_AUDIO_IMPORT_EXTENSIONS, 'vst3', 'dll'],
+    maxAudioBytes: MAX_DIRECT_FILE_READ_BYTES,
+    scanLimit: DIRECTORY_SCAN_LIMIT
+});
+const rendererRoles = new Map();
+const rendererEntryPath = path.resolve(__dirname, '../dist/index.html');
 
 let mainWindow = null;
 let hubWindow = null;
 let editorWindow = null;
+let editorProduct = null;
 let pendingAuthCallbackUrl = null;
 let pendingAuthCallbackResult = null;
 let pendingDesktopAuthRequest = null;
@@ -112,6 +143,32 @@ const logMainError = (label, error) => {
     console.error(`[main:${label}] ${message}`);
 };
 
+const isTrustedRuntimeUrl = (url) => isTrustedRendererUrl(url, {
+    isDev: isDevRuntime(),
+    devOrigin: 'http://localhost:3000',
+    rendererFilePath: rendererEntryPath
+});
+
+const requireNativeSender = (event, allowedRoles) => {
+    return requireTrustedIpcSender(event, {
+        roles: rendererRoles,
+        allowedRoles,
+        isTrustedUrl: isTrustedRuntimeUrl
+    });
+};
+
+const runProjectBundleOperation = async (label, operation) => {
+    try {
+        return await operation();
+    } catch (error) {
+        logMainError(label, error);
+        if (error instanceof ProjectBundleIoError || error instanceof NativeBridgeSecurityError) {
+            throw new Error(error.message);
+        }
+        throw new Error('No se pudo completar la operación segura del proyecto .esp.');
+    }
+};
+
 process.on('uncaughtException', (error) => {
     logMainError('uncaughtException', error);
 });
@@ -119,68 +176,6 @@ process.on('uncaughtException', (error) => {
 process.on('unhandledRejection', (reason) => {
     logMainError('unhandledRejection', reason);
 });
-
-const sanitizeExtensions = (extensions) => {
-    if (!Array.isArray(extensions)) return new Set();
-
-    return new Set(
-        extensions
-            .filter((entry) => typeof entry === 'string')
-            .map((entry) => entry.trim().toLowerCase().replace(/^\./, ''))
-            .filter((entry) => entry.length > 0)
-    );
-};
-
-const scanDirectoryRecursive = async (rootDirectory, allowedExtensions) => {
-    const queue = [rootDirectory];
-    const collected = [];
-
-    while (queue.length > 0 && collected.length < DIRECTORY_SCAN_LIMIT) {
-        const current = queue.pop();
-        if (!current) continue;
-
-        let entries = [];
-        try {
-            entries = await fs.readdir(current, { withFileTypes: true });
-        } catch {
-            continue;
-        }
-
-        for (const entry of entries) {
-            if (collected.length >= DIRECTORY_SCAN_LIMIT) break;
-
-            const fullPath = path.join(current, entry.name);
-
-            if (entry.isDirectory()) {
-                queue.push(fullPath);
-                continue;
-            }
-
-            if (!entry.isFile()) continue;
-
-            const extension = path.extname(entry.name).toLowerCase().replace(/^\./, '');
-            if (allowedExtensions.size > 0 && !allowedExtensions.has(extension)) {
-                continue;
-            }
-
-            let size = 0;
-            try {
-                const fileStats = await fs.stat(fullPath);
-                size = fileStats.size;
-            } catch {
-                size = 0;
-            }
-
-            collected.push({
-                name: entry.name,
-                path: fullPath,
-                size
-            });
-        }
-    }
-
-    return collected;
-};
 
 const serializeWindowState = (win) => {
     if (!win) {
@@ -325,6 +320,7 @@ ipcMain.handle('benchmark-publish-status', async (_event, payload) => {
 
 // Save Project
 ipcMain.handle('save-project', async (event, data, defaultName) => {
+    requireNativeSender(event, ['editor']);
     const win = BrowserWindow.fromWebContents(event.sender);
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
         title: 'Guardar Proyecto Hollow Bits',
@@ -342,6 +338,7 @@ ipcMain.handle('save-project', async (event, data, defaultName) => {
 
 // Open Project
 ipcMain.handle('open-project', async (event) => {
+    requireNativeSender(event, ['editor']);
     const win = BrowserWindow.fromWebContents(event.sender);
     const { filePaths } = await dialog.showOpenDialog(win, {
         title: 'Abrir Proyecto',
@@ -357,10 +354,113 @@ ipcMain.handle('open-project', async (event) => {
     return null;
 });
 
+ipcMain.handle('project-bundle-write-start', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-write-start', async () => {
+        requireNativeSender(event, ['editor']);
+        const totalBytes = payload?.totalBytes;
+        if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0 || totalBytes > MAX_PROJECT_BUNDLE_BYTES) {
+            throw new ProjectBundleIoError('INVALID_PAYLOAD', 'El tamaño declarado del proyecto no es válido.');
+        }
+        const sha256 = assertSha256(payload?.sha256);
+        const defaultName = sanitizeProjectBundleFileName(payload?.defaultName);
+        const win = BrowserWindow.fromWebContents(event.sender);
+        const { canceled, filePath } = await dialog.showSaveDialog(win, {
+            title: 'Guardar Proyecto DAW-fi',
+            defaultPath: defaultName,
+            filters: [{ name: 'DAW-fi Portable Project', extensions: ['esp'] }]
+        });
+        if (canceled || !filePath) return { canceled: true };
+
+        const targetPath = path.extname(filePath).toLowerCase() === '.esp'
+            ? filePath
+            : `${filePath}.esp`;
+        const session = await projectBundleIo.beginWrite({
+            senderId: event.sender.id,
+            targetPath,
+            totalBytes,
+            sha256
+        });
+        return { canceled: false, ...session };
+    })
+));
+
+ipcMain.handle('project-bundle-write-chunk', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-write-chunk', async () => {
+        requireNativeSender(event, ['editor']);
+        return await projectBundleIo.appendWriteChunk({
+            senderId: event.sender.id,
+            sessionId: payload?.sessionId,
+            offset: payload?.offset,
+            data: payload?.data,
+            sha256: payload?.sha256
+        });
+    })
+));
+
+ipcMain.handle('project-bundle-write-complete', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-write-complete', async () => {
+        requireNativeSender(event, ['editor']);
+        return await projectBundleIo.completeWrite({
+            senderId: event.sender.id,
+            sessionId: payload?.sessionId
+        });
+    })
+));
+
+ipcMain.handle('project-bundle-write-cancel', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-write-cancel', async () => {
+        requireNativeSender(event, ['editor']);
+        return { success: await projectBundleIo.cancelWrite({
+            senderId: event.sender.id,
+            sessionId: payload?.sessionId
+        }) };
+    })
+));
+
+ipcMain.handle('project-bundle-read-start', async (event) => (
+    runProjectBundleOperation('project-bundle-read-start', async () => {
+        requireNativeSender(event, ['editor']);
+        const win = BrowserWindow.fromWebContents(event.sender);
+        const result = await dialog.showOpenDialog(win, {
+            title: 'Abrir Proyecto DAW-fi',
+            properties: ['openFile'],
+            filters: [{ name: 'DAW-fi Portable Project', extensions: ['esp'] }]
+        });
+        if (result.canceled || result.filePaths.length === 0) return null;
+        return await projectBundleIo.beginRead({
+            senderId: event.sender.id,
+            filePath: result.filePaths[0]
+        });
+    })
+));
+
+ipcMain.handle('project-bundle-read-chunk', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-read-chunk', async () => {
+        requireNativeSender(event, ['editor']);
+        return await projectBundleIo.readChunk({
+            senderId: event.sender.id,
+            sessionId: payload?.sessionId,
+            offset: payload?.offset,
+            length: payload?.length
+        });
+    })
+));
+
+ipcMain.handle('project-bundle-read-close', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-read-close', async () => {
+        requireNativeSender(event, ['editor']);
+        return { success: await projectBundleIo.closeRead({
+            senderId: event.sender.id,
+            sessionId: payload?.sessionId
+        }) };
+    })
+));
+
 // Select Audio Files
 ipcMain.handle('select-files', async (event) => {
+    requireNativeSender(event, ['editor']);
     const win = BrowserWindow.fromWebContents(event.sender);
-    const { filePaths } = await dialog.showOpenDialog(win, {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
         title: 'Importar Audio',
         properties: ['openFile', 'multiSelections'],
         filters: [
@@ -368,24 +468,13 @@ ipcMain.handle('select-files', async (event) => {
         ]
     });
 
-    if (filePaths && filePaths.length > 0) {
+    if (!canceled && filePaths && filePaths.length > 0) {
         assertAudioImportSelectionCount(filePaths.length);
 
         const files = [];
 
         for (const filePath of filePaths) {
-            const stats = await fs.stat(filePath);
-            if (!stats.isFile()) {
-                continue;
-            }
-
-            assertAudioImportFileSize(path.basename(filePath), stats.size);
-
-            files.push({
-                name: path.basename(filePath),
-                path: filePath,
-                size: stats.size
-            });
+            files.push(await nativeFileGrants.grantSelectedAudioFile(event.sender.id, filePath));
         }
 
         return files;
@@ -393,32 +482,19 @@ ipcMain.handle('select-files', async (event) => {
     return [];
 });
 
-ipcMain.handle('read-file-from-path', async (_event, rawFilePath) => {
-    const filePath = typeof rawFilePath === 'string' ? rawFilePath.trim() : '';
-    if (!filePath) return null;
-
+ipcMain.handle('read-file-from-path', async (event, rawFilePath) => {
+    requireNativeSender(event, ['editor']);
     try {
-        const stats = await fs.stat(filePath);
-        if (!stats.isFile()) return null;
-        if (stats.size > MAX_DIRECT_FILE_READ_BYTES) {
-            throw new Error('El archivo excede el tamano permitido para carga directa.');
-        }
-
-        const buffer = await fs.readFile(filePath);
-        const data = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-
-        return {
-            name: path.basename(filePath),
-            path: filePath,
-            data
-        };
+        return await nativeFileGrants.readGrantedAudioFile(event.sender.id, rawFilePath);
     } catch (error) {
-        console.error('read-file-from-path failed', error);
+        const code = error instanceof NativeFileGrantError ? error.code : 'READ_FAILED';
+        console.error(`read-file-from-path failed (${code})`);
         return null;
     }
 });
 
 ipcMain.handle('select-directory', async (event) => {
+    requireNativeSender(event, ['editor']);
     const win = BrowserWindow.fromWebContents(event.sender);
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
         title: 'Seleccionar carpeta',
@@ -429,26 +505,29 @@ ipcMain.handle('select-directory', async (event) => {
         return null;
     }
 
-    return filePaths[0];
+    return await nativeFileGrants.grantDirectory(event.sender.id, filePaths[0]);
 });
 
-ipcMain.handle('scan-directory-files', async (_event, payload) => {
+ipcMain.handle('scan-directory-files', async (event, payload) => {
+    requireNativeSender(event, ['editor']);
     const directory = typeof payload?.directory === 'string' ? payload.directory : '';
     if (!directory) return [];
 
     try {
-        const stats = await fs.stat(directory);
-        if (!stats.isDirectory()) return [];
-    } catch {
+        return await nativeFileGrants.scanGrantedDirectory(
+            event.sender.id,
+            directory,
+            payload?.extensions
+        );
+    } catch (error) {
+        const code = error instanceof NativeFileGrantError ? error.code : 'SCAN_FAILED';
+        console.error(`scan-directory-files failed (${code})`);
         return [];
     }
-
-    const extensions = sanitizeExtensions(payload?.extensions);
-    const files = await scanDirectoryRecursive(directory, extensions);
-    return files;
 });
 
-ipcMain.handle('transcode-audio', async (_event, payload) => {
+ipcMain.handle('transcode-audio', async (event, payload) => {
+    requireNativeSender(event, ['editor']);
     const format = String(payload?.outputFormat || '').toLowerCase();
     if (!AUDIO_FORMATS.has(format)) {
         return { success: false, error: 'Formato de salida invalido.' };
@@ -546,6 +625,14 @@ const loadRendererSurface = (win, surface, params = {}) => {
 };
 
 const attachWindowLifecycle = (win, role) => {
+    const senderId = win.webContents.id;
+    rendererRoles.set(senderId, role);
+    attachTrustedNavigation(win, isTrustedRuntimeUrl);
+    win.webContents.once('destroyed', () => {
+        rendererRoles.delete(senderId);
+        nativeFileGrants.clearSender(senderId);
+        void projectBundleIo.closeForSender(senderId);
+    });
     const notifyState = () => broadcastWindowState(win);
     const rendererVisibilityGuard = createRendererVisibilityGuard({
         win,
@@ -645,11 +732,11 @@ const createHubWindow = () => {
 };
 
 const normalizeEditorRequest = (request) => {
-    if (!request || typeof request !== 'object') return {};
+    const normalized = normalizeDesktopEditorRequest(request);
     return {
-        project: typeof request.projectId === 'string' ? request.projectId : undefined,
-        token: typeof request.shareToken === 'string' ? request.shareToken : undefined,
-        localPath: typeof request.localPath === 'string' ? request.localPath : undefined,
+        product: normalized.product,
+        project: normalized.projectId,
+        token: normalized.shareToken,
     };
 };
 
@@ -663,14 +750,21 @@ const showHubWindow = () => {
 };
 
 const createEditorWindow = (request = {}) => {
+    const rendererRequest = normalizeEditorRequest(request);
+    const requestedProduct = rendererRequest.product;
     if (editorWindow && !editorWindow.isDestroyed()) {
+        if (editorProduct !== requestedProduct) {
+            editorProduct = requestedProduct;
+            editorWindow.setTitle(getDesktopProductTitle(requestedProduct));
+            loadRendererSurface(editorWindow, 'editor', rendererRequest);
+        }
         editorWindow.focus();
         return editorWindow;
     }
 
     const windowIcon = getWindowIcon();
     editorWindow = new BrowserWindow({
-        title: 'DAW-fi',
+        title: getDesktopProductTitle(requestedProduct),
         width: 1400,
         height: 900,
         minWidth: 1120,
@@ -689,6 +783,7 @@ const createEditorWindow = (request = {}) => {
         },
         autoHideMenuBar: true,
     });
+    editorProduct = requestedProduct;
     mainWindow = editorWindow;
 
     attachWindowLifecycle(editorWindow, 'editor');
@@ -715,6 +810,7 @@ const createEditorWindow = (request = {}) => {
 
     editorWindow.on('closed', () => {
         editorWindow = null;
+        editorProduct = null;
         mainWindow = hubWindow;
         if (!liveBenchmarkRuntime.enabled && hubWindow && !hubWindow.isDestroyed()) {
             showHubWindow();
@@ -725,7 +821,7 @@ const createEditorWindow = (request = {}) => {
         hubWindow.hide();
     }
 
-    loadRendererSurface(editorWindow, 'editor', normalizeEditorRequest(request));
+    loadRendererSurface(editorWindow, 'editor', rendererRequest);
 
     editorWindow.once('ready-to-show', () => {
         if (!editorWindow || editorWindow.isDestroyed()) return;
@@ -754,6 +850,7 @@ const AUTH_PENDING_FILE = 'desktop-auth-pending.bin';
 const AUTH_SESSION_FILE = 'desktop-auth-session.bin';
 const AUTH_REQUEST_TIMEOUT_MS = 15_000;
 const consumedAuthStates = new Map();
+const authCallbackCoordinator = createAuthCallbackCoordinator();
 
 const isSecureStorageAvailable = () => {
     if (!safeStorage.isEncryptionAvailable()) return false;
@@ -888,7 +985,7 @@ const sendDesktopAuthResult = (payload) => {
     target.webContents.send('desktop-auth-callback', payload);
 };
 
-const processAuthCallback = async (rawUrl) => {
+const processAuthCallbackOnce = async (rawUrl) => {
     pruneConsumedAuthStates();
     const pending = await readPendingAuthRequest();
     if (!pending) {
@@ -961,6 +1058,15 @@ const processAuthCallback = async (rawUrl) => {
     }
 };
 
+const processAuthCallback = (rawUrl) => {
+    const callbackState = readCallbackState(rawUrl);
+    const stateDigest = callbackState ? digestAuthState(callbackState) : '';
+    return authCallbackCoordinator.run(
+        stateDigest,
+        () => processAuthCallbackOnce(rawUrl)
+    );
+};
+
 const deliverAuthCallback = (url) => {
     if (!url) return;
     if (!app.isReady()) {
@@ -970,7 +1076,8 @@ const deliverAuthCallback = (url) => {
     void processAuthCallback(url);
 };
 
-ipcMain.handle('desktop-open-editor', async (_event, request) => {
+ipcMain.handle('desktop-open-editor', async (event, request) => {
+    requireNativeSender(event, ['hub']);
     try {
         createEditorWindow(request);
         return { success: true };
@@ -981,7 +1088,8 @@ ipcMain.handle('desktop-open-editor', async (_event, request) => {
     }
 });
 
-ipcMain.handle('desktop-show-hub', async () => {
+ipcMain.handle('desktop-show-hub', async (event) => {
+    requireNativeSender(event, ['editor']);
     try {
         if (editorWindow && !editorWindow.isDestroyed()) {
             editorWindow.close();
@@ -1127,6 +1235,10 @@ app.whenReady().then(() => {
 
 app.on('child-process-gone', (_event, details) => {
     logMainError('child-process-gone', `${details.type} (${details.reason}, exitCode=${details.exitCode})`);
+});
+
+app.on('will-quit', () => {
+    void projectBundleIo.closeAll();
 });
 
 app.on('window-all-closed', () => {

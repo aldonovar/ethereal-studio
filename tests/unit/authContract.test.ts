@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertDawfiSupabaseUrl,
+  buildDesktopEmailConfirmationRedirectUrl,
   DAWFI_AUTH_CONTRACT,
   isDawfiSupabaseUrl,
 } from '../../services/authContract';
@@ -31,5 +32,14 @@ describe('DAW-fi unified auth contract', () => {
       .toBe(DAWFI_AUTH_CONTRACT.supabaseUrl);
     expect(() => assertDawfiSupabaseUrl('https://wrong-project.supabase.co'))
       .toThrow(/xnmkoybfuyivmiuckpxs/);
+  });
+
+  it('routes desktop email confirmation through the explicit PKCE callback', () => {
+    const redirect = new URL(buildDesktopEmailConfirmationRedirectUrl());
+
+    expect(redirect.origin).toBe('https://play.hollowbits.com');
+    expect(redirect.pathname).toBe('/auth/callback');
+    expect(redirect.searchParams.get('next')).toBe('/console');
+    expect(redirect.searchParams.has('verified')).toBe(false);
   });
 });

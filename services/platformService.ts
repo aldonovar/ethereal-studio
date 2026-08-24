@@ -3,6 +3,7 @@ import {
   DesktopAuthLaunchResult,
   DesktopAuthRequest,
   DesktopOpenEditorRequest,
+  DesktopProjectFileResult,
   DesktopWindowState,
   DirectoryScanRequest,
   FileData,
@@ -10,6 +11,15 @@ import {
   SelectedAudioFile,
 } from '../types';
 import { desktopRuntimeService } from './desktopRuntimeService';
+import { sha256Blob, sha256Buffer } from './storage/blobDigestService';
+
+const MAX_PROJECT_BUNDLE_BYTES = 1024 * 1024 * 1024;
+const MAX_PROJECT_BUNDLE_CHUNK_BYTES = 4 * 1024 * 1024;
+
+export interface PortableProjectOpenResult {
+  blob: Blob;
+  filename: string;
+}
 
 class PlatformService {
   public isDesktop: boolean;
@@ -388,6 +398,146 @@ class PlatformService {
       };
       window.addEventListener('focus', onFocusBack);
 
+      input.click();
+    });
+  }
+
+  public async savePortableProject(bundle: Blob, name: string): Promise<DesktopProjectFileResult> {
+    if (!(bundle instanceof Blob) || bundle.size <= 0 || bundle.size > MAX_PROJECT_BUNDLE_BYTES) {
+      throw new Error('El proyecto portable está vacío o supera 1 GiB.');
+    }
+
+    const safeName = name.replace(/[^a-z0-9\s-_]/gi, '').trim() || 'Sin-titulo';
+    const fileName = `${safeName}.esp`;
+    const host = desktopRuntimeService.api;
+    if (!host) {
+      const url = URL.createObjectURL(bundle);
+      try {
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = fileName;
+        anchor.click();
+        return { success: true, filePath: safeName };
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    if (!host.beginProjectSave
+      || !host.writeProjectSaveChunk
+      || !host.completeProjectSave
+      || !host.cancelProjectSave) {
+      throw new Error('Esta instalación de DAW-fi no dispone del canal binario seguro para .esp.');
+    }
+
+    const streamSha256 = await sha256Blob(bundle, MAX_PROJECT_BUNDLE_CHUNK_BYTES);
+    const started = await host.beginProjectSave({
+      defaultName: fileName,
+      totalBytes: bundle.size,
+      sha256: streamSha256,
+    });
+    if (started.canceled) return { success: false, canceled: true };
+    if (!started.sessionId
+      || !Number.isSafeInteger(started.chunkBytes)
+      || started.chunkBytes! <= 0
+      || started.chunkBytes! > MAX_PROJECT_BUNDLE_CHUNK_BYTES) {
+      throw new Error('El proceso principal devolvió una sesión de escritura inválida.');
+    }
+
+    const sessionId = started.sessionId;
+    const chunkBytes = started.chunkBytes!;
+    try {
+      let offset = 0;
+      while (offset < bundle.size) {
+        const end = Math.min(bundle.size, offset + chunkBytes);
+        const data = await bundle.slice(offset, end).arrayBuffer();
+        const result = await host.writeProjectSaveChunk({
+          sessionId,
+          offset,
+          data,
+          sha256: await sha256Buffer(data),
+        });
+        if (result.nextOffset !== end) {
+          throw new Error('El proceso principal no confirmó el bloque .esp completo.');
+        }
+        offset = result.nextOffset;
+      }
+      return await host.completeProjectSave({ sessionId });
+    } catch (error) {
+      await host.cancelProjectSave({ sessionId }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  public async openPortableProjectFile(): Promise<PortableProjectOpenResult | null> {
+    const host = desktopRuntimeService.api;
+    if (host) {
+      if (!host.beginProjectRead || !host.readProjectChunk || !host.closeProjectRead) {
+        throw new Error('Esta instalación de DAW-fi no dispone del canal binario seguro para .esp.');
+      }
+
+      const started = await host.beginProjectRead();
+      if (!started) return null;
+      if (!Number.isSafeInteger(started.totalBytes)
+        || started.totalBytes <= 0
+        || started.totalBytes > MAX_PROJECT_BUNDLE_BYTES
+        || !Number.isSafeInteger(started.chunkBytes)
+        || started.chunkBytes <= 0
+        || started.chunkBytes > MAX_PROJECT_BUNDLE_CHUNK_BYTES) {
+        await host.closeProjectRead({ sessionId: started.sessionId }).catch(() => undefined);
+        throw new Error('El proceso principal devolvió metadatos de lectura inválidos.');
+      }
+
+      const parts: BlobPart[] = [];
+      let offset = 0;
+      try {
+        while (offset < started.totalBytes) {
+          const length = Math.min(started.chunkBytes, started.totalBytes - offset);
+          const result = await host.readProjectChunk({
+            sessionId: started.sessionId,
+            offset,
+            length,
+          });
+          const data = this.toArrayBuffer(result.data);
+          if (!data
+            || result.offset !== offset
+            || result.nextOffset !== offset + data.byteLength
+            || data.byteLength !== length) {
+            throw new Error('El bloque .esp leído no coincide con la secuencia solicitada.');
+          }
+          parts.push(data);
+          offset = result.nextOffset;
+        }
+        return {
+          blob: new Blob(parts, { type: 'application/vnd.dawfi.project+zip' }),
+          filename: started.filename,
+        };
+      } finally {
+        await host.closeProjectRead({ sessionId: started.sessionId }).catch(() => undefined);
+      }
+    }
+
+    return await new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.esp,application/zip,application/json';
+      let resolved = false;
+      const finish = (value: PortableProjectOpenResult | null) => {
+        if (resolved) return;
+        resolved = true;
+        window.removeEventListener('focus', onFocusBack);
+        resolve(value);
+      };
+      const onFocusBack = () => {
+        setTimeout(() => {
+          if (!resolved) finish(null);
+        }, 300);
+      };
+      input.onchange = () => {
+        const file = input.files?.[0];
+        finish(file ? { blob: file, filename: file.name } : null);
+      };
+      window.addEventListener('focus', onFocusBack);
       input.click();
     });
   }

@@ -1,123 +1,109 @@
-import { localAudioCache } from './localAudioCache';
-import { cloudStorageService } from './cloudStorageService';
+import type { AssetRef } from '@hollowbits/core';
 import { projectOsService } from '../projectOsService';
+import { cloudStorageService } from './cloudStorageService';
+import { localAudioCache } from './localAudioCache';
+
+export interface ProjectAudioAsset {
+  blob: Blob;
+  fileName?: string;
+}
 
 /**
- * Audio Resource Manager
- * Proxy between the Engine and the storage layers (Local/OPFS + Cloud/Supabase).
- * Now supports background FLAC compression via WebWorkers to halve egress costs.
+ * Resolves project audio through the local cache first and Supabase Storage
+ * second. Explicit cloud saves are transactional from the UI perspective:
+ * project metadata is not committed until every referenced source is remote.
  */
 class AudioResourceManager {
-  private worker: Worker | null = null;
-
-  constructor() {
-    this.initWorker();
-  }
-
-  private initWorker() {
-    if (typeof window !== 'undefined') {
-      // Initialize the Web Worker for FLAC encoding
-      this.worker = new Worker(new URL('./flacWorker.ts', import.meta.url), { type: 'module' });
-    }
-  }
-
-  /**
-   * Promisifies the Worker compression call.
-   */
-  private compressToFlac(id: string, pcmData: ArrayBuffer | Float32Array): Promise<Blob> {
-    return new Promise((resolve, reject) => {
-      if (!this.worker) return reject(new Error("Worker not initialized"));
-
-      const handleMessage = (e: MessageEvent) => {
-        if (e.data.id === id) {
-          this.worker?.removeEventListener('message', handleMessage);
-          if (e.data.success) {
-            resolve(e.data.flacBlob);
-          } else {
-            reject(new Error(e.data.error));
-          }
-        }
-      };
-
-      this.worker.addEventListener('message', handleMessage);
-      this.worker.postMessage({
-        id,
-        pcmData,
-        sampleRate: 44100, // Hardcoded for demo, engine will provide this
-        numChannels: 1
-      });
-    });
-  }
-
-  /**
-   * Retrieves an audio buffer. Checks local OPFS/IDB cache first.
-   * If not found, downloads from cloud and caches it locally.
-   */
-  public async getAudioBuffer(projectId: string, fileId: string): Promise<Blob> {
-    // 1. Check local cache (fast)
+  public async getAudioBuffer(projectId: string, fileId: string, assetPath?: string): Promise<Blob> {
     const localBlob = await localAudioCache.getAudioLocally(fileId);
     if (localBlob) {
       return localBlob;
     }
 
-    // 2. Not in cache, download from cloud (slow)
-    console.log(`[Storage] Cache miss for ${fileId}, downloading from cloud...`);
-    const cloudBlob = await cloudStorageService.downloadAudioFromCloud(projectId, fileId);
+    console.info(`[Storage] Cache miss for ${fileId}; downloading project audio.`);
+    const cloudBlob = await cloudStorageService.downloadAudioFromCloud(projectId, fileId, assetPath);
 
-    // 3. Save asymmetrically to local cache for future
-    // We don't await this so we can return the blob to the engine ASAP
-    localAudioCache.saveAudioLocally(fileId, cloudBlob).catch(err => {
-      console.error('[Storage] Failed to cache downloaded audio:', err);
+    localAudioCache.saveAudioLocally(fileId, cloudBlob).catch((error: unknown) => {
+      console.error('[Storage] Failed to cache downloaded audio:', error);
     });
 
     return cloudBlob;
   }
 
-  /**
-   * Commits the current session's new audio recordings to the cloud in the background.
-   * Compresses WAV to FLAC dynamically before upload to save 50% bandwidth.
-   */
-  public async commitSessionAudio(projectId: string, unsyncedFiles: Map<string, Blob>): Promise<void> {
-    const uploadPromises = Array.from(unsyncedFiles.entries()).map(async ([fileId, blob]) => {
-      try {
-        // Compress to FLAC if it's raw WAV
-        let uploadBlob = blob;
-        if (blob.type === 'audio/wav' || blob.type === 'audio/x-wav' || blob.type === '') {
-           const arrayBuffer = await blob.arrayBuffer();
-           uploadBlob = await this.compressToFlac(fileId, arrayBuffer);
-        }
+  public async commitProjectAudio(
+    projectId: string,
+    workspaceId: string | undefined,
+    assets: Map<string, ProjectAudioAsset>,
+  ): Promise<AssetRef[]> {
+    const entries = Array.from(assets.entries());
+    const committed: Array<AssetRef | undefined> = new Array(entries.length);
+    const failures: unknown[] = [];
+    let nextIndex = 0;
 
-        // Upload compressed FLAC to cloud only during explicit commit/save flows.
-        const cloudPath = await cloudStorageService.uploadAudioToCloud(projectId, fileId, uploadBlob);
-        await projectOsService.registerAsset({
+    const commitOne = async (index: number): Promise<void> => {
+      const entry = entries[index];
+      if (!entry) return;
+      const [fileId, asset] = entry;
+
+      try {
+        const cloudPath = await cloudStorageService.uploadAudioToCloud(
+          projectId,
+          fileId,
+          asset.blob,
+          asset.fileName,
+        );
+        const assetRecord = await projectOsService.registerAsset({
           bucket: 'project-audio',
           path: cloudPath,
           projectId,
-          sizeBytes: uploadBlob.size,
-          format: uploadBlob.type.includes('flac') ? 'flac' : 'wav',
-          sampleRate: 44100,
+          workspaceId,
+          hash: fileId,
+          sizeBytes: asset.blob.size,
+          format: cloudPath.split('.').pop() || 'bin',
           metadata: {
-            source: 'audioResourceManager.commitSessionAudio',
+            source: 'audioResourceManager.commitProjectAudio',
             fileId,
+            originalName: asset.fileName,
           },
-        }).catch((assetError) => {
-          console.warn('[Storage] Audio uploaded but asset indexing failed:', assetError);
         });
-        
-      } catch (err) {
-        console.error(`[Storage] Failed to compress/sync ${fileId} to cloud`, err);
-      }
-    });
 
-    // Fire and forget
-    Promise.allSettled(uploadPromises).then(results => {
-      const failed = results.filter(r => r.status === 'rejected');
-      if (failed.length > 0) {
-        console.warn(`[Storage] ${failed.length} files failed to sync in background.`);
-      } else {
-        console.log(`[Storage] Lazy sync complete. ${results.length} files compressed to FLAC and synced.`);
+        committed[index] = {
+          id: assetRecord.id,
+          bucket: assetRecord.bucket,
+          path: assetRecord.path,
+          ownerId: assetRecord.owner_id,
+          workspaceId: assetRecord.workspace_id || undefined,
+          projectId: assetRecord.project_id || undefined,
+          hash: assetRecord.hash || fileId,
+          sizeBytes: assetRecord.size_bytes,
+          durationSeconds: assetRecord.duration_seconds || undefined,
+          format: assetRecord.format || undefined,
+          sampleRate: assetRecord.sample_rate || undefined,
+          licenseState: assetRecord.license_state as AssetRef['licenseState'],
+          createdAt: assetRecord.created_at,
+        } satisfies AssetRef;
+      } catch (error: unknown) {
+        console.error(`[Storage] Failed to sync ${fileId} to cloud`, error);
+        failures.push(error);
       }
-    });
+    };
+
+    const workerCount = Math.min(2, entries.length);
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+      while (nextIndex < entries.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        await commitOne(currentIndex);
+      }
+    }));
+
+    if (failures.length > 0) {
+      throw new Error(`No se pudieron sincronizar ${failures.length} de ${entries.length} archivos de audio.`);
+    }
+
+    const result = committed.filter((ref): ref is AssetRef => Boolean(ref));
+    console.info(`[Storage] Cloud audio sync complete: ${result.length} original assets.`);
+    return result;
   }
 }
 

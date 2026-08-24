@@ -584,9 +584,9 @@ export interface DesktopWindowState {
 }
 
 export interface DesktopOpenEditorRequest {
+  product?: 'studio' | 'score' | 'keys';
   projectId?: string;
   shareToken?: string;
-  localPath?: string;
 }
 
 export interface DesktopAuthRequest {
@@ -626,6 +626,60 @@ export interface DesktopAuthCallbackResult extends DesktopAuthLaunchResult {
   session?: DesktopAuthSessionPayload;
 }
 
+export interface DesktopProjectWriteStartRequest {
+  defaultName: string;
+  totalBytes: number;
+  sha256: string;
+}
+
+export interface DesktopProjectWriteStartResult {
+  canceled: boolean;
+  sessionId?: string;
+  chunkBytes?: number;
+}
+
+export interface DesktopProjectWriteChunkRequest {
+  sessionId: string;
+  offset: number;
+  data: ArrayBuffer;
+  sha256: string;
+}
+
+export interface DesktopProjectWriteChunkResult {
+  nextOffset: number;
+}
+
+export interface DesktopProjectReadStartResult {
+  sessionId: string;
+  filename: string;
+  totalBytes: number;
+  chunkBytes: number;
+}
+
+export interface DesktopProjectReadChunkRequest {
+  sessionId: string;
+  offset: number;
+  length: number;
+}
+
+export interface DesktopProjectReadChunkResult {
+  offset: number;
+  nextOffset: number;
+  data: ArrayBuffer;
+}
+
+export interface DesktopProjectSessionRequest {
+  sessionId: string;
+}
+
+export interface DesktopProjectFileResult {
+  success: boolean;
+  canceled?: boolean;
+  filePath?: string;
+  backupFileName?: string;
+  error?: string;
+}
+
 export interface DesktopHostAPI {
   minimize: () => void;
   maximize: () => void;
@@ -649,6 +703,13 @@ export interface DesktopHostAPI {
   scanDirectoryFiles?: (request: DirectoryScanRequest) => Promise<ScannedFileEntry[]>;
   saveProject: (data: string, filename: string) => Promise<{ success: boolean; filePath?: string }>;
   openProject: () => Promise<{ text: string; filename: string } | null>;
+  beginProjectSave?: (request: DesktopProjectWriteStartRequest) => Promise<DesktopProjectWriteStartResult>;
+  writeProjectSaveChunk?: (request: DesktopProjectWriteChunkRequest) => Promise<DesktopProjectWriteChunkResult>;
+  completeProjectSave?: (request: DesktopProjectSessionRequest) => Promise<DesktopProjectFileResult>;
+  cancelProjectSave?: (request: DesktopProjectSessionRequest) => Promise<{ success: boolean }>;
+  beginProjectRead?: () => Promise<DesktopProjectReadStartResult | null>;
+  readProjectChunk?: (request: DesktopProjectReadChunkRequest) => Promise<DesktopProjectReadChunkResult>;
+  closeProjectRead?: (request: DesktopProjectSessionRequest) => Promise<{ success: boolean }>;
   transcodeAudio?: (request: AudioTranscodeRequest) => Promise<AudioTranscodeResult>;
   onBenchmarkStart?: (callback: (config: LiveCaptureRunConfig) => void) => (() => void);
   publishBenchmarkArtifact?: (

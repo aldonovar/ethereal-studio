@@ -85,7 +85,12 @@ const AISidebar: React.FC<AISidebarProps> = ({ isOpen, onClose, onPatternGenerat
                     <Bot size={18} />
                     <h2 className="font-bold tracking-wider text-sm">ASISTENTE DE ESTUDIO AI</h2>
                 </div>
-                <button onClick={onClose} className="hover:text-white text-gray-400 transition-colors">
+                <button
+                    type="button"
+                    onClick={onClose}
+                    aria-label="Cerrar asistente AI"
+                    className="min-h-11 min-w-11 inline-flex items-center justify-center hover:text-white text-gray-400 transition-colors"
+                >
                     <X size={16} />
                 </button>
             </div>
@@ -154,7 +159,7 @@ const AISidebar: React.FC<AISidebarProps> = ({ isOpen, onClose, onPatternGenerat
                         <div className="mt-8">
                             <h3 className="text-[10px] font-bold text-gray-500 uppercase mb-3 px-1">Tendencias</h3>
                             <div className="flex flex-wrap gap-2">
-                                {["Batería Liquid DnB", "Acordes Deep House", "Arpegio Cyberpunk", "Hi-Hats Trap"].map(p => (
+                                {["Batería Liquid DnB", "Acordes Deep House", "Arpegio minimal", "Hi-Hats Trap"].map(p => (
                                     <button
                                         key={p}
                                         onClick={() => setPrompt(p)}

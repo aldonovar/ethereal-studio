@@ -295,6 +295,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
 
     if (!result.success || !result.session) {
+      // A browser may dispatch the same custom-protocol callback more than once
+      // (automatic attempt plus a manual retry). Once a valid session exists, a
+      // late replay notice must never replace that successful authenticated state.
+      if (result.errorCode === 'AUTH_DESKTOP_HANDOFF_REPLAYED' && get().session) {
+        set({
+          desktopAuthPending: false,
+          desktopAuthError: null,
+          isLoading: false,
+        });
+        return true;
+      }
+
       set({
         desktopAuthPending: false,
         desktopAuthError: {

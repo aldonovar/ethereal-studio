@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Loader2, Music2, Pause, Play, RefreshCcw, RotateCcw, Square, Wand2, X } from 'lucide-react';
 import {
     Clip,
@@ -18,6 +18,7 @@ import {
 import { pianoTranscriptionService } from '../services/pianoTranscriptionService';
 import {
     buildScoreTransportFrame,
+    normalizeScoreNotesToAudibleClipWindow,
     scoreSource16thToGlobalTimeline16th,
     timeline16thToBarTime,
     type ScoreClipTransportContext
@@ -34,8 +35,11 @@ export interface PianoScoreMidiCommitPayload {
     sourceClipId: string;
 }
 
+export type PianoScoreSurfaceMode = 'combined' | 'score' | 'keys';
+
 interface PianoScoreWorkspaceProps {
     isOpen: boolean;
+    surfaceMode?: PianoScoreSurfaceMode;
     tracks: Track[];
     transport: TransportState;
     selectedTrackId: string | null;
@@ -79,7 +83,7 @@ const upsertWorkspace = (workspaces: ScoreWorkspaceState[], nextWorkspace: Score
     return workspaces.map((workspace, index) => index === existingIndex ? next : workspace);
 };
 
-const buttonBase = 'h-8 px-3 rounded-sm border text-[10px] font-bold uppercase tracking-wider transition-all disabled:cursor-not-allowed disabled:opacity-40 flex items-center gap-2';
+const buttonBase = 'h-11 md:h-8 px-3 rounded-sm border text-[10px] font-bold uppercase tracking-wider transition-all disabled:cursor-not-allowed disabled:opacity-40 flex shrink-0 items-center gap-2';
 const subtleButtonClass = `${buttonBase} border-white/15 bg-[#151824] text-gray-300 hover:text-white hover:border-white/30`;
 const secondaryAccentButtonClass = `${buttonBase} border-daw-violet/35 bg-daw-violet/10 text-daw-violet hover:bg-daw-violet/18 hover:text-violet-100`;
 const successButtonClass = `${buttonBase} border-emerald-400/35 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/18`;
@@ -92,6 +96,7 @@ const isAbortError = (error: unknown): boolean => (
 
 const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
     isOpen,
+    surfaceMode = 'combined',
     tracks,
     transport,
     selectedTrackId,
@@ -108,6 +113,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
     onSeekToBarTime
 }) => {
     const rootRef = useRef<HTMLDivElement>(null);
+    const mobileTabsIdPrefix = useId().replace(/:/g, '');
     const transcriptionAbortRef = useRef<AbortController | null>(null);
     const transcriptionRequestIdRef = useRef(0);
     const [transportClock, setTransportClock] = useState<TransportClockSnapshot>(() => getTransportClockSnapshot());
@@ -119,6 +125,11 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
     const [selectedNoteKey, setSelectedNoteKey] = useState<string | null>(null);
     const [livePitches, setLivePitches] = useState<number[]>([]);
     const [sustainActive, setSustainActive] = useState(false);
+    const [mobilePanel, setMobilePanel] = useState<'score' | 'keys'>(() => surfaceMode === 'score' ? 'score' : 'keys');
+    const showScoreSurface = surfaceMode !== 'keys';
+    const showKeysSurface = surfaceMode !== 'score';
+    const showSurfaceTabs = showScoreSurface && showKeysSurface;
+    const productTitle = surfaceMode === 'score' ? 'Score-fi' : surfaceMode === 'keys' ? 'Keys-fi' : 'Score-fi · Keys-fi';
 
     const sourceCandidates = useMemo<SourceCandidate[]>(() => tracks.flatMap((track) => {
         if (track.type !== TrackType.MIDI && track.type !== TrackType.AUDIO) return [];
@@ -147,7 +158,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
         return createDefaultScoreWorkspace(
             selectedTrack.id,
             selectedClip.id,
-            `Piano Score / ${selectedTrack.name}`,
+            `Score-fi / ${selectedTrack.name}`,
             selectedTrack.type === TrackType.AUDIO ? 'audio-derived' : 'midi'
         );
     }, [selectedClip, selectedTrack]);
@@ -198,6 +209,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
         const sourceOriginalBpm = Math.max(1, clip.originalBpm ?? 120);
         return {
             sourceKind: track.type === TrackType.AUDIO ? 'audio' : 'midi',
+            noteTimeDomain: currentWorkspace?.source.kind === 'audio-derived' ? 'clip-local' : 'source-grid',
             clipStartBar: clip.start,
             clipLengthBars: clip.length,
             clipOffsetBars: clip.offset,
@@ -210,7 +222,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
             trackTransposeSemitones: track.transpose,
             masterTransposeSemitones: transport.masterTranspose
         };
-    }, [sourceClipContext, transcriptionGridBpm, transport.bpm, transport.masterTranspose]);
+    }, [currentWorkspace?.source.kind, sourceClipContext, transcriptionGridBpm, transport.bpm, transport.masterTranspose]);
 
     const derivedClipContext = useMemo(() => {
         if (!currentWorkspace || currentWorkspace.source.kind !== 'audio-derived') return null;
@@ -307,8 +319,15 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
 
     const commitEditableNotes = useCallback((nextNotes: Note[]) => {
         if (!currentWorkspace || !sourceClipContext) return;
+        const normalizedNextNotes = normalizeClipNotes(nextNotes);
+        const notesForClip = currentWorkspace.source.kind === 'audio-derived' && scoreClipTransportContext
+            ? normalizeScoreNotesToAudibleClipWindow(normalizedNextNotes, {
+                ...scoreClipTransportContext,
+                noteTimeDomain: 'clip-local'
+            })
+            : normalizedNextNotes;
         const payload: PianoScoreMidiCommitPayload = {
-            notes: normalizeClipNotes(nextNotes),
+            notes: notesForClip,
             clipName: currentWorkspace.source.kind === 'audio-derived'
                 ? `SCORE DRAFT - ${sourceClipContext.track.name}`
                 : sourceClipContext.clip.name,
@@ -327,7 +346,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
         }
 
         setDraftNotes(payload.notes);
-    }, [currentWorkspace, onUpdateMidiClip, sourceClipContext]);
+    }, [currentWorkspace, onUpdateMidiClip, scoreClipTransportContext, sourceClipContext]);
 
     const handleNoteUpdate = useCallback((noteIndex: number, nextNote: Note) => {
         const nextNotes = workingNotes.map((note, index) => index === noteIndex ? nextNote : note);
@@ -432,8 +451,15 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                 controller.signal
             );
             if (requestId !== transcriptionRequestIdRef.current || controller.signal.aborted) return;
+            const clipLocalNotes = scoreClipTransportContext
+                ? normalizeScoreNotesToAudibleClipWindow(result.notes, {
+                    ...scoreClipTransportContext,
+                    noteTimeDomain: 'source-grid',
+                    noteGridBpm: transport.bpm
+                })
+                : result.notes;
             setTranscriptionGridBpm(transport.bpm);
-            setDraftNotes(result.notes);
+            setDraftNotes(clipLocalNotes);
             setWorkspace((workspace) => ({
                 ...workspace,
                 mode: 'transcribe',
@@ -455,11 +481,17 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                 setIsScanning(false);
             }
         }
-    }, [setWorkspace, sourceClipContext, transport.bpm]);
+    }, [scoreClipTransportContext, setWorkspace, sourceClipContext, transport.bpm]);
 
     const handleCommitMidi = useCallback(() => {
         if (!currentWorkspace || !sourceClipContext) return;
-        const notesToCommit = draftNotes || workingNotes;
+        const pendingNotes = draftNotes || workingNotes;
+        const notesToCommit = currentWorkspace.source.kind === 'audio-derived' && scoreClipTransportContext
+            ? normalizeScoreNotesToAudibleClipWindow(pendingNotes, {
+                ...scoreClipTransportContext,
+                noteTimeDomain: 'clip-local'
+            })
+            : pendingNotes;
         if (notesToCommit.length === 0) {
             setScanError('No hay notas listas para convertir a partitura o MIDI.');
             return;
@@ -497,7 +529,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
             }
         }));
         setDraftNotes(null);
-    }, [currentWorkspace, draftNotes, onCreateMidiTrackFromScore, onUpdateMidiClip, setWorkspace, sourceClipContext, workingNotes]);
+    }, [currentWorkspace, draftNotes, onCreateMidiTrackFromScore, onUpdateMidiClip, scoreClipTransportContext, setWorkspace, sourceClipContext, workingNotes]);
 
     const handleSplitResizeStart = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
         if (!rootRef.current || !currentWorkspace) return;
@@ -527,15 +559,15 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
 
     if (!currentWorkspace || !selectedTrack || !selectedClip) {
         return (
-            <div className="flex h-full w-full items-center justify-center bg-[#0b0d12] px-6 text-gray-300">
-                <div className="w-full max-w-2xl rounded-sm border border-white/10 bg-[#11131a] p-6 shadow-2xl">
+            <div className="flex h-full w-full items-center justify-center bg-[#0b0d12] px-3 text-gray-300 sm:px-6">
+                <div className="w-full max-w-2xl rounded-sm border border-white/10 bg-[#11131a] p-4 shadow-2xl sm:p-6">
                     <div className="flex items-start justify-between gap-4 border-b border-daw-border pb-4">
                         <div className="flex items-start gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-sm border border-daw-violet/30 bg-daw-violet/10 text-daw-violet">
                                 <Music2 size={18} />
                             </div>
                             <div>
-                                <div className="text-[10px] uppercase tracking-[0.22em] text-gray-500">Piano Score</div>
+                                <div className="text-[10px] uppercase tracking-[0.22em] text-gray-500">{productTitle}</div>
                                 <div className="mt-1 text-lg font-semibold text-white">Selecciona una fuente musical</div>
                                 <p className="mt-2 max-w-xl text-sm leading-6 text-gray-400">
                                     El editor de partitura trabaja directo sobre clips MIDI y sobre drafts derivados desde audio de piano.
@@ -543,9 +575,11 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                             </div>
                         </div>
                         <button
+                            type="button"
                             onClick={handleCloseWorkspace}
-                            className="flex h-8 w-8 items-center justify-center rounded-sm border border-white/10 bg-white/5 text-gray-400 hover:text-white hover:border-white/30"
-                            title="Cerrar Piano Score"
+                            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-sm border border-white/10 bg-white/5 text-gray-400 hover:border-white/30 hover:text-white md:h-8 md:w-8"
+                            title={`Cerrar ${productTitle}`}
+                            aria-label={`Cerrar ${productTitle}`}
                         >
                             <X size={14} />
                         </button>
@@ -556,7 +590,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                             <select
                                 value=""
                                 onChange={(event) => handleSourceChange(event.target.value)}
-                                className="h-10 min-w-[320px] flex-1 rounded-sm border border-white/10 bg-[#0b1018] px-3 text-sm text-gray-200 outline-none focus:border-daw-violet/50"
+                                className="h-11 min-w-0 w-full flex-1 rounded-sm border border-white/10 bg-[#0b1018] px-3 text-sm text-gray-200 outline-none focus:border-daw-violet/50 md:h-10 md:w-auto md:min-w-[320px]"
                             >
                                 <option value="" disabled>Elegir clip MIDI o audio de piano...</option>
                                 {sourceCandidates.map((candidate) => (
@@ -569,7 +603,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                         </div>
                     ) : (
                         <div className="mt-5 rounded-sm border border-dashed border-white/15 bg-[#0f1219] px-4 py-4 text-sm text-gray-500">
-                            No hay clips MIDI ni clips de audio listos para Piano Score todavia.
+                            No hay clips MIDI ni clips de audio listos para {productTitle} todavía.
                         </div>
                     )}
                 </div>
@@ -609,7 +643,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                 : 'Sin destino';
 
     let workflowTitle = 'Partitura conectada';
-    let workflowHint = 'Las ediciones del Piano Cinema actualizan directamente el clip MIDI seleccionado.';
+    let workflowHint = 'Las ediciones de Keys-fi actualizan directamente el clip MIDI seleccionado.';
     let emptyTitle = 'Clip MIDI vacio';
     let emptyMessage = 'Graba o dibuja notas en el clip para ver la partitura y el visualizador en tiempo real.';
 
@@ -654,7 +688,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
 
     return (
         <div ref={rootRef} className="flex h-full w-full flex-col bg-[#0b0d12] text-white">
-            <div className="h-10 shrink-0 border-b border-daw-border bg-[#18181b] px-3">
+            <div className="h-12 shrink-0 border-b border-daw-border bg-[#18181b] px-3 md:h-10">
                 <div className="flex h-full items-center justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-3">
                         <div className="flex min-w-0 items-center gap-2 rounded-sm bg-black/20 py-0.5 pr-3">
@@ -666,9 +700,9 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                                 {selectedTrack.name}
                             </span>
                         </div>
-                        <div className="h-4 w-px shrink-0 bg-daw-border" />
-                        <div className="min-w-0">
-                            <div className="text-[10px] uppercase tracking-[0.22em] text-gray-500">Piano Score</div>
+                        <div className="hidden h-4 w-px shrink-0 bg-daw-border sm:block" />
+                        <div className="hidden min-w-0 sm:block">
+                            <div className="text-[10px] uppercase tracking-[0.22em] text-gray-500">{productTitle}</div>
                             <div className="truncate text-[11px] text-gray-300">{selectedClip.name}</div>
                         </div>
                     </div>
@@ -683,9 +717,11 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                             </span>
                         )}
                         <button
+                            type="button"
                             onClick={handleCloseWorkspace}
-                            className="flex h-8 w-8 items-center justify-center rounded-sm border border-white/10 bg-white/5 text-gray-400 hover:text-white hover:border-white/30"
-                            title="Cerrar Piano Score"
+                            className="flex h-11 w-11 items-center justify-center rounded-sm border border-white/10 bg-white/5 text-gray-400 hover:border-white/30 hover:text-white md:h-8 md:w-8"
+                            title={`Cerrar ${productTitle}`}
+                            aria-label={`Cerrar ${productTitle}`}
                         >
                             <X size={14} />
                         </button>
@@ -693,21 +729,47 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                 </div>
             </div>
 
-            <div className="shrink-0 border-b border-daw-border bg-[#11131a] px-4 py-2.5">
-                <div className="flex flex-wrap items-center gap-2">
+            <div className="shrink-0 border-b border-daw-border bg-[#11131a] px-2 py-2 md:px-4 md:py-2.5">
+                {showSurfaceTabs && <div className="mb-2 grid grid-cols-2 gap-1 md:hidden" role="tablist" aria-label="Vistas de Score-fi y Keys-fi">
+                    <button
+                        type="button"
+                        id={`${mobileTabsIdPrefix}-score-tab`}
+                        role="tab"
+                        aria-selected={mobilePanel === 'score'}
+                        aria-controls={`${mobileTabsIdPrefix}-score-panel`}
+                        onClick={() => setMobilePanel('score')}
+                        className={`${buttonBase} justify-center ${mobilePanel === 'score' ? 'border-white/30 bg-white/10 text-white' : 'border-white/10 bg-[#151824] text-gray-400'}`}
+                    >
+                        Partitura
+                    </button>
+                    <button
+                        type="button"
+                        id={`${mobileTabsIdPrefix}-keys-tab`}
+                        role="tab"
+                        aria-selected={mobilePanel === 'keys'}
+                        aria-controls={`${mobileTabsIdPrefix}-keys-panel`}
+                        onClick={() => setMobilePanel('keys')}
+                        className={`${buttonBase} justify-center ${mobilePanel === 'keys' ? 'border-white/30 bg-white/10 text-white' : 'border-white/10 bg-[#151824] text-gray-400'}`}
+                    >
+                        Keys-fi
+                    </button>
+                </div>}
+
+                <div className="-mx-1 touch-pan-x overflow-x-auto overscroll-x-contain pb-1 [scrollbar-width:thin]">
+                    <div className="flex min-w-max items-center gap-2 px-1">
                     <select
                         value={activeSourceId}
                         onChange={(event) => handleSourceChange(event.target.value)}
                         disabled={isScanning}
-                        aria-label="Fuente de Piano Score"
-                        className="h-9 min-w-[320px] rounded-sm border border-white/10 bg-[#0b1018] px-3 text-xs text-gray-200 outline-none focus:border-daw-violet/50 disabled:cursor-not-allowed disabled:opacity-45"
+                        aria-label="Fuente musical de Score-fi y Keys-fi"
+                        className="h-11 w-[min(78vw,320px)] min-w-[240px] rounded-sm border border-white/10 bg-[#0b1018] px-3 text-xs text-gray-200 outline-none focus:border-daw-violet/50 disabled:cursor-not-allowed disabled:opacity-45 md:h-9 md:w-auto md:min-w-[320px]"
                     >
                         {sourceCandidates.map((candidate) => (
                             <option key={candidate.id} value={candidate.id}>{candidate.label}</option>
                         ))}
                     </select>
 
-                    <label className="flex h-8 items-center gap-2 rounded-sm border border-white/10 bg-[#151824] px-3 text-[10px] font-bold uppercase tracking-wider text-gray-300">
+                    <label className="flex h-11 shrink-0 items-center gap-2 rounded-sm border border-white/10 bg-[#151824] px-3 text-[10px] font-bold uppercase tracking-wider text-gray-300 md:h-8">
                         <input
                             type="checkbox"
                             checked={currentWorkspace.layout.followTransport}
@@ -718,7 +780,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                     </label>
 
                     <div className={`rounded-sm border px-2 py-1 text-[9px] font-bold uppercase tracking-wider ${confidenceClass}`}>
-                        Confianza {confidenceLabel}
+                        Confianza detector {confidenceLabel}
                     </div>
 
                     <div className="rounded-sm border border-white/10 bg-[#151824] px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-gray-400">
@@ -778,9 +840,10 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                         <RotateCcw size={14} />
                         Reset Overrides
                     </button>
+                    </div>
                 </div>
 
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                <div className="mt-1 flex touch-pan-x items-center gap-2 overflow-x-auto overscroll-x-contain pb-1 text-[11px] [scrollbar-width:thin] md:mt-2 md:flex-wrap">
                     <div className="rounded-sm border border-white/10 bg-[#151824] px-3 py-1.5 text-gray-300">
                         {workflowTitle}
                     </div>
@@ -816,49 +879,65 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                 </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-hidden p-3">
+            <div className="min-h-0 flex-1 overflow-hidden p-2 md:p-3">
                 <div
-                    className="grid h-full gap-2"
-                    style={{ gridTemplateRows: `${Math.round(splitRatio * 100)}% 12px minmax(220px, 1fr)` }}
+                    className={`h-full gap-2 ${showSurfaceTabs ? 'md:grid' : 'block'}`}
+                    style={showSurfaceTabs ? { gridTemplateRows: `${Math.round(splitRatio * 100)}% 12px minmax(220px, 1fr)` } : undefined}
                 >
-                    <ScoreViewport
-                        document={scoreDocument}
-                        playhead16th={transportFrame.playhead16th}
-                        bpm={transport.bpm}
-                        isPlaying={transportClock.isPlaying}
-                        selectedNoteKey={selectedNoteKey}
-                        followTransport={currentWorkspace.layout.followTransport}
-                        zoom={currentWorkspace.layout.zoom}
-                        emptyTitle={emptyTitle}
-                        emptyMessage={emptyMessage}
-                        onSelectNoteKey={setSelectedNoteKey}
-                        onSeekToTimeline16th={handleSeekToTimeline16th}
-                    />
+                    {showScoreSurface && <div
+                        id={`${mobileTabsIdPrefix}-score-panel`}
+                        role={showSurfaceTabs ? 'tabpanel' : 'region'}
+                        aria-labelledby={showSurfaceTabs ? `${mobileTabsIdPrefix}-score-tab` : undefined}
+                        aria-label={showSurfaceTabs ? undefined : 'Score-fi'}
+                        className={`${!showSurfaceTabs || mobilePanel === 'score' ? 'block' : 'hidden'} h-full min-h-0 ${showSurfaceTabs ? 'md:block' : ''}`}
+                    >
+                        <ScoreViewport
+                            document={scoreDocument}
+                            playhead16th={transportFrame.playhead16th}
+                            bpm={transport.bpm}
+                            isPlaying={transportClock.isPlaying}
+                            selectedNoteKey={selectedNoteKey}
+                            followTransport={currentWorkspace.layout.followTransport}
+                            zoom={currentWorkspace.layout.zoom}
+                            emptyTitle={emptyTitle}
+                            emptyMessage={emptyMessage}
+                            onSelectNoteKey={setSelectedNoteKey}
+                            onSeekToTimeline16th={handleSeekToTimeline16th}
+                        />
+                    </div>}
 
-                    <div
+                    {showSurfaceTabs && <div
                         onPointerDown={handleSplitResizeStart}
-                        className="flex w-full cursor-row-resize items-center justify-center rounded-sm border border-white/10 bg-[#11131a]"
+                        className="hidden w-full cursor-row-resize items-center justify-center rounded-sm border border-white/10 bg-[#11131a] md:flex"
                     >
                         <div className="h-px w-16 bg-white/20" />
-                    </div>
+                    </div>}
 
-                    <PianoCinema
-                        notes={workingNotes}
-                        playhead16th={transportFrame.playhead16th}
-                        bpm={transport.bpm}
-                        isPlaying={transportClock.isPlaying}
-                        total16ths={total16ths}
-                        selectedNoteKey={selectedNoteKey}
-                        activeNoteIndexes={transportFrame.activeNoteIndexes}
-                        livePitches={livePitches}
-                        sustainActive={sustainActive}
-                        zoom={currentWorkspace.layout.zoom}
-                        emptyTitle={emptyTitle}
-                        emptyMessage={emptyMessage}
-                        onSelectNoteKey={setSelectedNoteKey}
-                        onSeekToTimeline16th={handleSeekToTimeline16th}
-                        onUpdateNote={handleNoteUpdate}
-                    />
+                    {showKeysSurface && <div
+                        id={`${mobileTabsIdPrefix}-keys-panel`}
+                        role={showSurfaceTabs ? 'tabpanel' : 'region'}
+                        aria-labelledby={showSurfaceTabs ? `${mobileTabsIdPrefix}-keys-tab` : undefined}
+                        aria-label={showSurfaceTabs ? undefined : 'Keys-fi'}
+                        className={`${!showSurfaceTabs || mobilePanel === 'keys' ? 'block' : 'hidden'} h-full min-h-0 ${showSurfaceTabs ? 'md:block' : ''}`}
+                    >
+                        <PianoCinema
+                            notes={workingNotes}
+                            playhead16th={transportFrame.playhead16th}
+                            bpm={transport.bpm}
+                            isPlaying={transportClock.isPlaying}
+                            total16ths={total16ths}
+                            selectedNoteKey={selectedNoteKey}
+                            activeNoteIndexes={transportFrame.activeNoteIndexes}
+                            livePitches={livePitches}
+                            sustainActive={sustainActive}
+                            zoom={currentWorkspace.layout.zoom}
+                            emptyTitle={emptyTitle}
+                            emptyMessage={emptyMessage}
+                            onSelectNoteKey={setSelectedNoteKey}
+                            onSeekToTimeline16th={handleSeekToTimeline16th}
+                            onUpdateNote={handleNoteUpdate}
+                        />
+                    </div>}
                 </div>
             </div>
         </div>

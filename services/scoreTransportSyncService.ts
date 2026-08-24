@@ -14,6 +14,7 @@ export interface ScoreTransportFrame {
 
 export interface ScoreClipTransportContext {
     sourceKind: 'audio' | 'midi';
+    noteTimeDomain?: 'source-grid' | 'clip-local';
     clipStartBar: number;
     clipLengthBars: number;
     clipOffsetBars: number;
@@ -131,6 +132,9 @@ export const globalTimeline16thToScoreSource16th = (
 ): number => {
     const transform = getScoreClipTransportTransform(context);
     const clipLocal16th = globalTimeline16th - transform.clipStart16th;
+    if (context.noteTimeDomain === 'clip-local') {
+        return clipLocal16th;
+    }
     return (clipLocal16th + transform.clipOffset16th) * transform.sourceGridRate;
 };
 
@@ -139,10 +143,64 @@ export const scoreSource16thToGlobalTimeline16th = (
     context: ScoreClipTransportContext
 ): number => {
     const transform = getScoreClipTransportTransform(context);
+    if (context.noteTimeDomain === 'clip-local') {
+        return clamp(
+            transform.clipStart16th + Math.max(0, sourceTimeline16th),
+            transform.clipStart16th,
+            transform.clipEnd16th
+        );
+    }
     const unclamped = transform.clipStart16th
         + (Math.max(0, sourceTimeline16th) / transform.sourceGridRate)
         - transform.clipOffset16th;
     return clamp(unclamped, transform.clipStart16th, transform.clipEnd16th);
+};
+
+export const normalizeScoreNotesToAudibleClipWindow = <T extends Note>(
+    notes: readonly T[],
+    context: ScoreClipTransportContext
+): T[] => {
+    const transform = getScoreClipTransportTransform(context);
+    const sourceGridRate = Math.max(0.0001, transform.sourceGridRate);
+    const clipDuration16th = Math.max(0, transform.clipEnd16th - transform.clipStart16th);
+    const inputIsClipLocal = context.noteTimeDomain === 'clip-local';
+    const inputGridRate = inputIsClipLocal ? 1 : sourceGridRate;
+    const inputWindowStart16th = inputIsClipLocal ? 0 : transform.clipOffset16th * sourceGridRate;
+    const inputWindowEnd16th = inputWindowStart16th + (clipDuration16th * inputGridRate);
+    const epsilon = 1e-6;
+
+    return notes.flatMap((note) => {
+        const sourceNoteStart = finiteOr(note.start, 0);
+        const sourceNoteDuration = Math.max(0, finiteOr(note.duration, 0));
+        const sourceNoteEnd = sourceNoteStart + sourceNoteDuration;
+        const clippedSourceStart = Math.max(sourceNoteStart, inputWindowStart16th);
+        const clippedSourceEnd = Math.min(sourceNoteEnd, inputWindowEnd16th);
+
+        if (clippedSourceEnd - clippedSourceStart <= epsilon) {
+            return [];
+        }
+
+        const localStart = clamp(
+            (clippedSourceStart - inputWindowStart16th) / inputGridRate,
+            0,
+            clipDuration16th
+        );
+        const localEnd = clamp(
+            (clippedSourceEnd - inputWindowStart16th) / inputGridRate,
+            localStart,
+            clipDuration16th
+        );
+
+        if (localEnd - localStart <= epsilon) {
+            return [];
+        }
+
+        return [{
+            ...note,
+            start: localStart,
+            duration: localEnd - localStart
+        } as T];
+    }).sort((left, right) => left.start - right.start || left.pitch - right.pitch);
 };
 
 export const buildScoreTransportFrame = (

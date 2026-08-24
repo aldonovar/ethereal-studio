@@ -4,6 +4,7 @@ import {
     buildScoreTransportFrame,
     getScoreClipTransportTransform,
     globalTimeline16thToScoreSource16th,
+    normalizeScoreNotesToAudibleClipWindow,
     scoreSource16thToGlobalTimeline16th,
     timeline16thToBarTime,
     type ScoreClipTransportContext
@@ -115,5 +116,78 @@ describe('scoreTransportSyncService Arrange clip mapping', () => {
         expect(atNoteEnd.activeNoteIndexes).toEqual([]);
         expect(after.globalPlayhead16th).toBe(48);
         expect(after.activeNoteIndexes).toEqual([]);
+    });
+
+    it('drops notes outside a trimmed clip and clips boundary-crossing notes into local time', () => {
+        const context = audioContext({
+            clipLengthBars: 1,
+            clipOffsetBars: 0.5,
+            playbackRate: 1
+        });
+        const notes: Note[] = [
+            { pitch: 40, start: 0, duration: 8, velocity: 80 },
+            { pitch: 41, start: 6, duration: 4, velocity: 81 },
+            { pitch: 42, start: 12, duration: 4, velocity: 82 },
+            { pitch: 43, start: 22, duration: 4, velocity: 83 },
+            { pitch: 44, start: 24, duration: 2, velocity: 84 }
+        ];
+
+        expect(normalizeScoreNotesToAudibleClipWindow(notes, context)).toEqual([
+            { pitch: 41, start: 0, duration: 2, velocity: 81 },
+            { pitch: 42, start: 4, duration: 4, velocity: 82 },
+            { pitch: 43, start: 14, duration: 2, velocity: 83 }
+        ]);
+    });
+
+    it('translates source notes using fast and slow playback rates without exceeding clip length', () => {
+        const fast = normalizeScoreNotesToAudibleClipWindow([
+            { pitch: 60, start: 12, duration: 3, velocity: 90 },
+            { pitch: 64, start: 24, duration: 6, velocity: 91 },
+            { pitch: 67, start: 57, duration: 9, velocity: 92 },
+            { pitch: 72, start: 60, duration: 2, velocity: 93 }
+        ], audioContext({
+            clipLengthBars: 2,
+            clipOffsetBars: 0.5,
+            playbackRate: 1.5
+        }));
+        const slow = normalizeScoreNotesToAudibleClipWindow([
+            { pitch: 55, start: 10, duration: 2, velocity: 88 }
+        ], audioContext({
+            clipLengthBars: 1,
+            clipOffsetBars: 1,
+            playbackRate: 0.5
+        }));
+
+        expect(fast).toEqual([
+            { pitch: 60, start: 0, duration: 2, velocity: 90 },
+            { pitch: 64, start: 8, duration: 4, velocity: 91 },
+            { pitch: 67, start: 30, duration: 2, velocity: 92 }
+        ]);
+        expect(slow).toEqual([
+            { pitch: 55, start: 4, duration: 4, velocity: 88 }
+        ]);
+    });
+
+    it('keeps normalized drafts clip-local for transport, seek and commit clamping', () => {
+        const context = audioContext({
+            noteTimeDomain: 'clip-local',
+            clipStartBar: 3,
+            clipLengthBars: 1,
+            clipOffsetBars: 4,
+            playbackRate: 2
+        });
+        const clamped = normalizeScoreNotesToAudibleClipWindow([
+            { pitch: 60, start: -2, duration: 4, velocity: 90 },
+            { pitch: 64, start: 14, duration: 4, velocity: 91 },
+            { pitch: 67, start: 16, duration: 2, velocity: 92 }
+        ], context);
+
+        expect(clamped).toEqual([
+            { pitch: 60, start: 0, duration: 2, velocity: 90 },
+            { pitch: 64, start: 14, duration: 2, velocity: 91 }
+        ]);
+        expect(globalTimeline16thToScoreSource16th(32, context)).toBe(0);
+        expect(globalTimeline16thToScoreSource16th(40, context)).toBe(8);
+        expect(scoreSource16thToGlobalTimeline16th(8, context)).toBe(40);
     });
 });

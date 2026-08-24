@@ -5,6 +5,10 @@ const root = process.cwd();
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const main = read('electron/main.cjs');
 const authModule = read('electron/desktop-auth.cjs');
+const authCallbackCoordinator = read('electron/desktop-auth-callback-coordinator.cjs');
+const preload = read('electron/preload.cjs');
+const desktopRoot = read('DesktopRoot.tsx');
+const desktopAuthUi = read('components/desktop/DesktopAuth.tsx');
 const authStore = read('stores/authStore.ts');
 const supabase = read('services/supabase.ts');
 const authContractModule = read('services/authContract.ts');
@@ -26,6 +30,9 @@ requireSnippet(main, 'DAWFI_AUTH_CONTRACT.desktopRedirectUri', 'DAW-fi protocol 
 requireSnippet(main, 'safeStorage', 'Electron safeStorage is not used for Desktop auth persistence.');
 requireSnippet(main, 'createAuthorizationRequest({', 'Desktop auth does not start with an OAuth authorization request.');
 requireSnippet(main, 'exchangeAuthorizationCode({', 'Desktop auth does not exchange the one-time code in main.');
+requireSnippet(main, 'authCallbackCoordinator.run(', 'Desktop auth callbacks are not serialized by state.');
+requireSnippet(authCallbackCoordinator, 'const entries = new Map()', 'Desktop callback coordinator has no per-state registry.');
+requireSnippet(authCallbackCoordinator, 'return existing.promise', 'Duplicate callbacks do not share the same exchange promise.');
 requireSnippet(authModule, "code_challenge_method', 'S256'", 'Desktop OAuth does not require S256 PKCE.');
 requireSnippet(authModule, 'DAWFI_AUTH_CONTRACT.socialAuthorizationPath', 'Desktop still depends on a separately registered OAuth Server client.');
 requireSnippet(authModule, 'DAWFI_AUTH_CONTRACT.desktopBridgeUrl', 'Desktop social login does not use the protected HTTPS bridge.');
@@ -36,6 +43,12 @@ requireSnippet(authModule, "new Set(['code', 'state'])", 'Successful callbacks a
 requireSnippet(supabase, 'detectSessionInUrl: false', 'Renderer URL session detection is still enabled.');
 requireSnippet(supabase, "flowType: 'pkce'", 'Supabase renderer client is not configured for PKCE.');
 requireSnippet(supabase, 'isDawfiSupabaseUrl', 'The renderer does not fail closed on a mismatched Supabase project.');
+requireSnippet(preload, "ipcRenderer.on('desktop-auth-callback', handler)", 'Preload does not forward the sanitized Desktop auth result.');
+requireSnippet(desktopRoot, 'window.electron?.onAuthCallback?', 'Desktop root does not subscribe to the auth handoff.');
+requireSnippet(desktopRoot, 'void handleAuthCallback(url).then((success)', 'Desktop root does not await the renderer auth store result.');
+requireSnippet(authStore, "result.errorCode === 'AUTH_DESKTOP_HANDOFF_REPLAYED' && get().session", 'A late replay warning can overwrite an established Desktop session.');
+requireSnippet(desktopAuthUi, 'buildDesktopEmailConfirmationRedirectUrl()', 'Desktop email signup bypasses the explicit callback exchange.');
+requireSnippet(authContractModule, 'DAWFI_AUTH_CONTRACT.authCallbackPath', 'Desktop email confirmation does not use the shared callback path.');
 requireSnippet(launcher, "read_public_env_value 'VITE_SUPABASE_ANON_KEY'", 'The launcher cannot load the public Supabase key used for PKCE exchange.');
 requireSnippet(launcher, '--password-store=gnome-libsecret', 'The Linux launcher does not select Secret Service when the compositor cannot infer a secure store.');
 requireSnippet(launcher, 'org.freedesktop.secrets', 'The Linux launcher does not verify that Secret Service is active.');
@@ -48,6 +61,7 @@ forbidSnippet(main, "webContents.send('desktop-auth-callback', url)", 'A raw cal
 forbidSnippet(authStore, 'hashParams.get(\'access_token\')', 'Renderer still reads an access token from a URL fragment.');
 forbidSnippet(authStore, 'hashParams.get(\'refresh_token\')', 'Renderer still reads a refresh token from a URL fragment.');
 forbidSnippet(authStore, 'exchangeCodeForSession(code)', 'Renderer still exchanges a callback code outside the main-process broker.');
+forbidSnippet(desktopAuthUi, "searchParams.set('verified'", 'Desktop email confirmation still skips the explicit callback exchange.');
 forbidSnippet(supabase, 'document.cookie', 'Supabase sessions are still persisted in JavaScript cookies.');
 forbidSnippet(launcher, 'source "${env_file}"', 'The launcher sources the entire env file into the privileged process.');
 

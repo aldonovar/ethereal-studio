@@ -4,15 +4,10 @@ import { AlertCircle, ArrowLeft, ArrowRight, AtSign, Lock, Mail, User } from 'lu
 import AppLogo from '../AppLogo';
 import { platformService } from '../../services/platformService';
 import { supabase } from '../../services/supabase';
+import { buildDesktopEmailConfirmationRedirectUrl } from '../../services/authContract';
 import { useAuthStore } from '../../stores/authStore';
 
 type AuthStatus = 'idle' | 'loading' | 'success' | 'error';
-
-function getDesktopEmailRedirectUrl(): string {
-  const url = new URL('https://play.hollowbits.com/login');
-  url.searchParams.set('verified', '1');
-  return url.toString();
-}
 
 interface DesktopAuthProps {
   type: 'login' | 'signup';
@@ -86,7 +81,7 @@ export function DesktopAuth({ type, onSuccess, onBack, onSwitchType }: DesktopAu
               full_name: fullName.trim(),
               username: username.trim(),
             },
-            emailRedirectTo: getDesktopEmailRedirectUrl(),
+            emailRedirectTo: buildDesktopEmailConfirmationRedirectUrl(),
           },
         });
 

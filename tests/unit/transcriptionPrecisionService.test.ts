@@ -77,7 +77,7 @@ const analyze = (events: ToneEvent[], durationSeconds = 1.4) => {
 const startSeconds = (note: { start: number }) => note.start * SECONDS_PER_16TH;
 const durationSeconds = (note: { duration: number }) => note.duration * SECONDS_PER_16TH;
 
-describe('Falling Notes transcription precision', () => {
+describe('Keys-fi transcription precision', () => {
     it('preserves strongly anti-phase stereo instead of cancelling the track', () => {
         const left = renderTones([{ midi: 69, start: 0, end: 0.5 }], 0.5);
         const right = Float32Array.from(left, (sample) => -sample);

@@ -148,7 +148,7 @@ describe('PianoScoreWorkspace transcription ownership', () => {
         renderWorkspace('clip-a');
 
         flushSync(() => buttonWithText('Analizar Piano').click());
-        const sourceSelect = container.querySelector('select[aria-label="Fuente de Piano Score"]');
+        const sourceSelect = container.querySelector('select[aria-label="Fuente musical de Score-fi y Keys-fi"]');
         expect(sourceSelect).toBeInstanceOf(HTMLSelectElement);
         expect((sourceSelect as HTMLSelectElement).disabled).toBe(true);
         expect(buttonWithText('Cancelar analisis')).toBeInstanceOf(HTMLButtonElement);
@@ -187,7 +187,7 @@ describe('PianoScoreWorkspace transcription ownership', () => {
         await Promise.resolve();
         flushSync(() => undefined);
 
-        const sourceSelect = container.querySelector('select[aria-label="Fuente de Piano Score"]') as HTMLSelectElement;
+        const sourceSelect = container.querySelector('select[aria-label="Fuente musical de Score-fi y Keys-fi"]') as HTMLSelectElement;
         expect(sourceSelect.disabled).toBe(false);
         expect(container.textContent).toContain('Transcripcion cancelada');
         expect(container.textContent).not.toContain('Cancelar analisis');

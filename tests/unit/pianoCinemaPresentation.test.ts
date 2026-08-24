@@ -69,7 +69,7 @@ describe('PianoCinema workstation presentation', () => {
         const markup = renderCinema();
 
         expect(markup).toContain('role="slider"');
-        expect(markup).toContain('aria-label="Posición del transporte de Falling Notes"');
+        expect(markup).toContain('aria-label="Posición del transporte de Keys-fi"');
         expect(markup).toContain('role="button"');
         expect(markup).toContain('aria-label="C4, inicio 4.00, duración 2.50, velocidad 118"');
         expect(markup).toContain('aria-label="Velocidad de la nota seleccionada"');

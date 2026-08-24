@@ -5,6 +5,15 @@ export const DAWFI_AUTH_CONTRACT = Object.freeze({
   scopes: Object.freeze([...rawContract.scopes]),
 });
 
+export const buildDesktopEmailConfirmationRedirectUrl = (): string => {
+  const callbackUrl = new URL(
+    DAWFI_AUTH_CONTRACT.authCallbackPath,
+    DAWFI_AUTH_CONTRACT.canonicalAuthOrigin,
+  );
+  callbackUrl.searchParams.set('next', '/console');
+  return callbackUrl.toString();
+};
+
 const normalizeOrigin = (rawUrl: string): string | null => {
   try {
     return new URL(rawUrl).origin;

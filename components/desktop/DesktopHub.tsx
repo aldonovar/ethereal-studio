@@ -16,8 +16,10 @@ import {
   List,
   LogOut,
   MoreVertical,
+  Music2,
   Palette,
   Pencil,
+  Piano,
   Play,
   Plus,
   RefreshCw,
@@ -45,6 +47,7 @@ type HubView = 'grid' | 'list';
 type HubDensity = 'comfortable' | 'compact';
 type HubAccent = 'violet' | 'cyan' | 'rose' | 'amber';
 type ProjectSort = 'updated' | 'name' | 'bpm';
+type DesktopProduct = 'studio' | 'score' | 'keys';
 type LicenseRecord = Database['public']['Tables']['licenses']['Row'];
 
 interface HubPreferences {
@@ -664,8 +667,12 @@ export function DesktopHub({ refreshSignal, onLogin, onSettings, onSignup }: Des
     setPreferences((current) => ({ ...current, ...patch }));
   };
 
+  const openProduct = async (product: DesktopProduct, projectId?: string) => {
+    await platformService.openEditor({ product, ...(projectId ? { projectId } : {}) });
+  };
+
   const openEditor = async (projectId?: string) => {
-    await platformService.openEditor(projectId ? { projectId } : undefined);
+    await openProduct('studio', projectId);
   };
 
   const createProject = async () => {
@@ -901,14 +908,68 @@ export function DesktopHub({ refreshSignal, onLogin, onSettings, onSignup }: Des
             <button className="desktop-btn" onClick={() => fileInputRef.current?.click()} disabled={!user || importingFile}>
               <Upload size={15} /> {importingFile ? 'Importando...' : 'Importar .esp'}
             </button>
-            <button className="desktop-btn" onClick={() => openEditor()}>
-              <Play size={15} /> Motor DAW
+            <button type="button" className="desktop-btn" onClick={() => openProduct('studio')}>
+              <Play size={15} /> DAW-fi Studio
             </button>
             <button className="desktop-btn desktop-btn--primary" onClick={createProject}>
               <Plus size={15} /> Nuevo proyecto
             </button>
           </div>
         </header>
+
+        <section className="desktop-product-launcher" aria-labelledby="desktop-products-title">
+          <div className="desktop-product-launcher__heading">
+            <div>
+              <p className="desktop-section-kicker">Herramientas musicales</p>
+              <h2 id="desktop-products-title">Elige tu espacio de trabajo</h2>
+            </div>
+            <p>Un solo proyecto y un mismo motor musical, con interfaces enfocadas para cada tarea.</p>
+          </div>
+          <div className="desktop-product-grid">
+            <button
+              type="button"
+              className="desktop-product-card"
+              data-desktop-product="studio"
+              aria-label="Abrir DAW-fi Studio"
+              onClick={() => openProduct('studio')}
+            >
+              <span className="desktop-product-card__icon" aria-hidden="true"><SlidersHorizontal size={19} /></span>
+              <span className="desktop-product-card__copy">
+                <strong>DAW-fi Studio</strong>
+                <small>Producción, arreglo, mezcla y grabación multipista.</small>
+              </span>
+              <ChevronRight size={17} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="desktop-product-card"
+              data-desktop-product="score"
+              aria-label="Abrir Score-fi"
+              onClick={() => openProduct('score')}
+            >
+              <span className="desktop-product-card__icon" aria-hidden="true"><Music2 size={19} /></span>
+              <span className="desktop-product-card__copy">
+                <strong>Score-fi</strong>
+                <small>Notación, revisión y edición musical conectada al proyecto.</small>
+              </span>
+              <ChevronRight size={17} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="desktop-product-card"
+              data-desktop-product="keys"
+              aria-label="Abrir Keys-fi"
+              onClick={() => openProduct('keys')}
+            >
+              <span className="desktop-product-card__icon" aria-hidden="true"><Piano size={19} /></span>
+              <span className="desktop-product-card__copy">
+                <strong>Keys-fi</strong>
+                <small>Teclado visual, interpretación y seguimiento preciso de notas.</small>
+              </span>
+              <ChevronRight size={17} aria-hidden="true" />
+            </button>
+          </div>
+        </section>
 
         {!user ? (
           <section className="desktop-guest-hero">
@@ -921,7 +982,7 @@ export function DesktopHub({ refreshSignal, onLogin, onSettings, onSignup }: Des
                   : 'El editor y los proyectos locales están disponibles. La nube no está configurada en este build.'}
               </p>
               <div className="desktop-actions">
-                <button className="desktop-btn" onClick={() => openEditor()}><CloudOff size={15} /> Editor local</button>
+                <button type="button" className="desktop-btn" onClick={() => openProduct('studio')}><CloudOff size={15} /> Abrir DAW-fi Studio</button>
                 <button className="desktop-btn desktop-btn--primary" onClick={onLogin} disabled={!isSupabaseConfigured}>Conectar cuenta</button>
               </div>
             </div>

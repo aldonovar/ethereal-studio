@@ -17,7 +17,7 @@ import AsciiPerformerDock from './components/AsciiPerformerDock';
 import CollabPanel, { CollabActivityEntry } from './components/CollabPanel';
 import { MiniAuthPanel } from './components/MiniAuthPanel';
 import { INITIAL_TRACKS, getTrackColorByPosition } from './constants';
-import { LoopMode, Note, SessionHealthSnapshot, StudioPerformanceProfile, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry, PunchRange, TransportAuthoritySnapshot, MonitoringRouteMode, RecordingCommitResult, RecordingJournalEntry, AutomationRuntimeFrame, AudioIncidentWindow, DiagnosticsVisibilityMode, VisualPerformanceSnapshot, AudioClipEditorViewState, ScoreWorkspaceState } from './types';
+import { LoopMode, Note, SessionHealthSnapshot, StudioPerformanceProfile, Track, TransportState, TrackType, AudioSettings, Clip, ProjectData, AutomationMode, ScannedFileEntry, PunchRange, TransportAuthoritySnapshot, MonitoringRouteMode, RecordingCommitResult, RecordingJournalEntry, AutomationRuntimeFrame, AudioIncidentWindow, DiagnosticsVisibilityMode, VisualPerformanceSnapshot, AudioClipEditorViewState, ScoreWorkspaceState, DesktopOpenEditorRequest } from './types';
 import { engineAdapter, type EngineDiagnostics } from './services/engineAdapter';
 import { midiService, MidiDevice } from './services/MidiService';
 import { platformService } from './services/platformService';
@@ -27,6 +27,19 @@ import {
     describeAudioImportFormats,
     isSupportedAudioImportName
 } from './services/audioImportContract';
+import { audioResourceManager } from './services/storage/audioResourceManager';
+import {
+    collectProjectAudioSourceRefs,
+    getProjectAudioAssetRef,
+    loadProjectAudioAssets,
+    mergeProjectAudioAssetRefs,
+    resolveProjectAudioBlob
+} from './services/storage/projectAudioAssetService';
+import {
+    createPortableProjectBundle,
+    readPortableProjectBundle
+} from './services/storage/portableProjectBundleService';
+import { cachePortableProjectAudioAssets } from './services/storage/portableProjectAssetCacheService';
 import {
     createTrack,
     removeTrackRoutingReferences,
@@ -176,7 +189,10 @@ interface SidebarItemProps {
 
 const SidebarItem: React.FC<SidebarItemProps> = React.memo(({ icon: Icon, label, active = false, onClick, color }) => (
     <button
+        type="button"
         onClick={onClick}
+        aria-label={label}
+        aria-pressed={active}
         className={`w-10 h-10 flex items-center justify-center relative group rounded-sm transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]
           ${active
                 ? 'bg-gradient-to-br from-purple-500/20 to-rose-500/20 text-white shadow-[0_0_20px_rgba(168,85,247,0.15)] ring-1 ring-white/10 scale-100'
@@ -264,6 +280,19 @@ interface RecordingSessionMeta {
 }
 
 type ToolPanel = 'browser' | 'ai' | 'scanner' | null;
+type DesktopProductSurface = NonNullable<DesktopOpenEditorRequest['product']>;
+
+const readDesktopProductSurface = (): DesktopProductSurface => {
+    if (typeof window === 'undefined') return 'studio';
+    const product = new URLSearchParams(window.location.search).get('product');
+    return product === 'score' || product === 'keys' ? product : 'studio';
+};
+
+const DESKTOP_PRODUCT_TITLES: Record<DesktopProductSurface, string> = {
+    studio: 'DAW-fi Studio',
+    score: 'Score-fi',
+    keys: 'Keys-fi'
+};
 
 const AUDIO_SETTINGS_STORAGE_KEY = 'hollowbits.audio-settings.v1';
 const AUDIO_SETTINGS_STORAGE_KEY_LEGACY = 'ethereal.audio-settings.v1';
@@ -336,6 +365,8 @@ const toPersistentClip = (clip: Clip): Clip => {
 
 const App: React.FC = () => {
     const initialCollabSnapshot = useMemo(() => loadCollabSessionSnapshot(), []);
+    const desktopProduct = useMemo(readDesktopProductSurface, []);
+    const isStandaloneMusicSurface = desktopProduct === 'score' || desktopProduct === 'keys';
 
     // Auth session (used for session indicator widget in sidebar)
     const { user, profile, session, signOut: authSignOut, initialize: authInitialize } = useAuthStore();
@@ -345,6 +376,10 @@ const App: React.FC = () => {
         const unsubscribe = authInitialize();
         return () => unsubscribe();
     }, [authInitialize]);
+
+    useEffect(() => {
+        document.title = DESKTOP_PRODUCT_TITLES[desktopProduct];
+    }, [desktopProduct]);
 
     // --- STATE ---
     const [projectName, setProjectName] = useState("Sin Título");
@@ -373,9 +408,9 @@ const App: React.FC = () => {
     const [collabCommandJournal, setCollabCommandJournal] = useState<CollabCommandRecord[]>(() => initialCollabSnapshot.commandJournal);
 
     // Side Panels
-    const [activeToolPanel, setActiveToolPanel] = useState<ToolPanel>(null);
+    const [activeToolPanel, setActiveToolPanel] = useState<ToolPanel>(() => isStandaloneMusicSurface ? 'scanner' : null);
     const [hasLoadedAISidebar, setHasLoadedAISidebar] = useState(false);
-    const [hasLoadedNoteScanner, setHasLoadedNoteScanner] = useState(false);
+    const [hasLoadedNoteScanner, setHasLoadedNoteScanner] = useState(isStandaloneMusicSurface);
     const [hasLoadedExportModal, setHasLoadedExportModal] = useState(false);
 
     // Menus & Modals
@@ -385,7 +420,7 @@ const App: React.FC = () => {
     const [isRenamingProject, setIsRenamingProject] = useState(false);
     const [renameValue, setRenameValue] = useState("");
     const [showProjectBrowser, setShowProjectBrowser] = useState(false);
-    const [cloudProjects, setCloudProjects] = useState<Array<{ id: string; name: string; updated_at: string; data: any }>>([]);
+    const [cloudProjects, setCloudProjects] = useState<Array<{ id: string; name: string; updated_at: string; workspace_id?: string; data: any }>>([]);
     const [loadingCloudProjects, setLoadingCloudProjects] = useState(false);
     const [showExportModal, setShowExportModal] = useState(false);
     const [recoverySnapshot, setRecoverySnapshot] = useState<ProjectAutosaveSnapshot | null>(null);
@@ -579,6 +614,10 @@ const App: React.FC = () => {
     });
     const recordingJournalEntriesRef = useRef<RecordingJournalEntry[]>(recordingJournalEntries);
     const latestTracksRef = useRef<Track[]>(tracks);
+    const projectAssetRefsRef = useRef<unknown[]>([]);
+    const projectWorkspaceIdRef = useRef<string | undefined>(undefined);
+    const syncProjectAudioToCloudRef = useRef<((projectId: string, workspaceId?: string) => Promise<void>) | null>(null);
+    const projectAudioSyncPromiseRef = useRef<{ projectId: string; promise: Promise<void> } | null>(null);
     const trackSyncQueuedRef = useRef(false);
     const trackSyncFrameRef = useRef<number | null>(null);
     const boundaryTransitionInFlightRef = useRef(false);
@@ -673,6 +712,16 @@ const App: React.FC = () => {
     const closeAllToolPanels = useCallback(() => {
         setActiveToolPanel(null);
     }, []);
+
+    const handleCloseMusicSurface = useCallback(() => {
+        if (!isStandaloneMusicSurface) {
+            closeAllToolPanels();
+            return;
+        }
+        void platformService.showHub().then((opened) => {
+            if (!opened) closeAllToolPanels();
+        });
+    }, [closeAllToolPanels, isStandaloneMusicSurface]);
 
     interface TrackMutationOptions {
         noHistory?: boolean;
@@ -1225,7 +1274,6 @@ const App: React.FC = () => {
         const urlParams = new URLSearchParams(window.location.search);
         const token = urlParams.get('token');
         const projectId = urlParams.get('project');
-        const localPath = urlParams.get('localPath');
 
         if (token) {
             const loadSharedSession = async () => {
@@ -1253,7 +1301,8 @@ const App: React.FC = () => {
                         if (sharedSession.data) {
                             const integrityReport = await hydrateProjectData(sharedSession.data as unknown as ProjectData, sharedSession.name, {
                                 source: 'open-project',
-                                rememberReport: true
+                                rememberReport: true,
+                                projectId: sharedSession.project_id
                             });
                             if (integrityReport.issueCount > 0) {
                                 console.warn('Project integrity repaired during open.', integrityReport);
@@ -1284,7 +1333,9 @@ const App: React.FC = () => {
                         if (data.data && Object.keys(data.data).length > 0) {
                             const integrityReport = await hydrateProjectData(data.data as unknown as ProjectData, data.name, {
                                 source: 'open-project',
-                                rememberReport: true
+                                rememberReport: true,
+                                projectId: data.id,
+                                workspaceId: data.workspace_id
                             });
                             if (integrityReport.issueCount > 0) {
                                 console.warn('Project integrity repaired during open.', integrityReport);
@@ -1298,34 +1349,6 @@ const App: React.FC = () => {
                 }
             };
             loadCloudProject();
-        } else if (localPath) {
-            const loadLocalProject = async () => {
-                setLoadingProject(true);
-                setLoadingMessage('Cargando proyecto local...');
-                try {
-                    const file = await platformService.readFileFromPath(localPath);
-                    if (!file?.data) {
-                        alert('No se pudo leer el proyecto local.');
-                        return;
-                    }
-
-                    const decoder = new TextDecoder();
-                    const parsed = JSON.parse(decoder.decode(file.data)) as ProjectData;
-                    const integrityReport = await hydrateProjectData(parsed, parsed.name || file.name.replace(/\.esp$/i, ''), {
-                        source: 'open-project',
-                        rememberReport: true
-                    });
-                    if (integrityReport.issueCount > 0) {
-                        console.warn('Project integrity repaired during local open.', integrityReport);
-                    }
-                } catch (e) {
-                    console.error('Error loading local project:', e);
-                    alert('No se pudo abrir el proyecto local.');
-                } finally {
-                    setLoadingProject(false);
-                }
-            };
-            loadLocalProject();
         }
     }, []);
 
@@ -3641,6 +3664,10 @@ const App: React.FC = () => {
                 notationOverrides: workspace.notationOverrides.map((override) => ({ ...override })),
                 confidenceRegions: workspace.confidenceRegions.map((region) => ({ ...region }))
             })),
+            assetRefs: projectAssetRefsRef.current.length > 0
+                ? [...projectAssetRefsRef.current]
+                : undefined,
+            workspaceId: projectWorkspaceIdRef.current,
             createdAt: Date.now(),
             lastModified: Date.now()
         };
@@ -3650,10 +3677,17 @@ const App: React.FC = () => {
     const hydrateProjectData = useCallback(async (
         projectCandidate: ProjectData,
         preferredName?: string,
-        options?: { source?: string; rememberReport?: boolean }
+        options?: { source?: string; rememberReport?: boolean; projectId?: string; workspaceId?: string }
     ): Promise<ProjectIntegrityReport> => {
         const integrityResult = repairProjectData(projectCandidate, { source: options?.source || 'hydrate-project' });
         const projectData = integrityResult.project;
+        const projectId = options?.projectId;
+        const workspaceId = options?.workspaceId || projectData.workspaceId;
+
+        projectAssetRefsRef.current = Array.isArray(projectData.assetRefs)
+            ? [...projectData.assetRefs]
+            : [];
+        projectWorkspaceIdRef.current = workspaceId;
 
         if (options?.rememberReport !== false) {
             rememberProjectIntegrityReport(integrityResult.report);
@@ -3664,21 +3698,58 @@ const App: React.FC = () => {
         pauseResumeArmedRef.current = false;
         setLoadingMessage('Relacionando Archivos...');
 
-        const rehydratedTracks = await Promise.all(projectData.tracks.map(async (track: Track) => {
-            const rehydratedClips = await Promise.all(track.clips.map(async (clip: Clip) => {
-                if (track.type === TrackType.AUDIO && clip.sourceId) {
-                    const blob = await assetDb.getFile(clip.sourceId);
-                    if (blob) {
-                        const arrayBuffer = await blob.arrayBuffer();
-                        const buffer = await engineAdapter.decodeAudioData(arrayBuffer);
-                        return { ...clip, buffer, isOffline: false };
-                    }
-
-                    return { ...clip, isOffline: true, buffer: undefined };
+        // Restore one source at a time. A parallel Promise.all here multiplies
+        // Blob, ArrayBuffer and decoded AudioBuffer pressure on large projects.
+        const hydratedAudioBuffers = new Map<string, AudioBuffer | null>();
+        const rehydratedTracks: Track[] = [];
+        for (const track of projectData.tracks) {
+            const rehydratedClips: Clip[] = [];
+            for (const clip of track.clips) {
+                if (track.type !== TrackType.AUDIO || !clip.sourceId) {
+                    rehydratedClips.push(clip);
+                    continue;
                 }
 
-                return clip;
-            }));
+                if (hydratedAudioBuffers.has(clip.sourceId)) {
+                    const sharedBuffer = hydratedAudioBuffers.get(clip.sourceId) || undefined;
+                    rehydratedClips.push({ ...clip, buffer: sharedBuffer, isOffline: !sharedBuffer });
+                    continue;
+                }
+
+                try {
+                    setLoadingMessage(`Restaurando audio: ${clip.name}`);
+                    const cachedBlob = await assetDb.getFile(clip.sourceId);
+                    if (!cachedBlob && projectId) {
+                        setLoadingMessage(`Descargando audio: ${clip.name}`);
+                    }
+                    const blob = await resolveProjectAudioBlob({
+                        assetRefs: projectAssetRefsRef.current,
+                        sourceId: clip.sourceId,
+                        projectId,
+                        workspaceId,
+                        getLocalBlob: async () => cachedBlob,
+                        downloadCloudBlob: (cloudProjectId, sourceId, assetPath) => (
+                            audioResourceManager.getAudioBuffer(cloudProjectId, sourceId, assetPath)
+                        ),
+                        cacheCloudBlob: (cloudBlob) => assetDb.saveFile(cloudBlob)
+                    });
+                    if (!blob) {
+                        hydratedAudioBuffers.set(clip.sourceId, null);
+                        rehydratedClips.push({ ...clip, isOffline: true, buffer: undefined });
+                        continue;
+                    }
+
+                    setLoadingMessage(`Decodificando audio: ${clip.name}`);
+                    const arrayBuffer = await blob.arrayBuffer();
+                    const buffer = await engineAdapter.decodeAudioData(arrayBuffer);
+                    hydratedAudioBuffers.set(clip.sourceId, buffer);
+                    rehydratedClips.push({ ...clip, buffer, isOffline: false });
+                } catch (error) {
+                    console.warn(`No se pudo restaurar la fuente de audio ${clip.name}.`, error);
+                    hydratedAudioBuffers.set(clip.sourceId, null);
+                    rehydratedClips.push({ ...clip, isOffline: true, buffer: undefined });
+                }
+            }
 
             const clipById = new Map(rehydratedClips.map((clip) => [clip.id, clip]));
             const sourceSessionClips = Array.isArray(track.sessionClips) ? track.sessionClips : [];
@@ -3689,12 +3760,12 @@ const App: React.FC = () => {
                 isQueued: false
             }));
 
-            return withTrackRuntimeDefaults({
+            rehydratedTracks.push(withTrackRuntimeDefaults({
                 ...track,
                 clips: rehydratedClips,
                 sessionClips: normalizedSessionClips
-            });
-        }));
+            }));
+        }
 
         replaceTracks(rehydratedTracks, { recolor: true });
 
@@ -3724,6 +3795,43 @@ const App: React.FC = () => {
         setSelectedClipId(rehydratedTracks[0]?.clips[0]?.id || null);
         return integrityResult.report;
     }, [rememberProjectIntegrityReport, replaceTracks]);
+
+    const hydratePortableProjectFile = useCallback(async (
+        blob: Blob,
+        filename: string
+    ): Promise<ProjectIntegrityReport> => {
+        setLoadingMessage('Verificando contenedor .esp...');
+        const portable = await readPortableProjectBundle(blob);
+        if (portable.format === 'portable-zip') {
+            setLoadingMessage('Verificando y guardando audio del proyecto...');
+            await cachePortableProjectAudioAssets(portable.audioAssets, {
+                saveFile: (audioBlob, knownBuffer) => assetDb.saveFile(audioBlob, knownBuffer),
+                getFile: (sourceId) => assetDb.getFile(sourceId)
+            });
+        }
+
+        const nameFromDisk = filename.replace(/\.esp$/i, '');
+        return await hydrateProjectData(
+            portable.projectData,
+            nameFromDisk || portable.projectData.name,
+            { source: 'open-project', rememberReport: true }
+        );
+    }, [hydrateProjectData]);
+
+    const savePortableProjectSnapshot = useCallback(async (
+        projectData: ProjectData,
+        name: string
+    ) => {
+        setLoadingMessage('Recopilando audio local...');
+        const audioAssets = await loadProjectAudioAssets(
+            projectData.tracks,
+            (sourceId) => assetDb.getFile(sourceId)
+        );
+        setLoadingMessage('Creando proyecto portable .esp...');
+        const bundle = await createPortableProjectBundle(projectData, audioAssets);
+        setLoadingMessage('Escribiendo y verificando .esp...');
+        return await platformService.savePortableProject(bundle, name);
+    }, []);
 
     const createProjectOsSnapshot = useCallback((): ProjectData => {
         const clockSnapshot = getTransportClockSnapshot();
@@ -3846,6 +3954,21 @@ const App: React.FC = () => {
         const intervalId = window.setInterval(async () => {
             if (projectCommandCount <= lastCloudSaveCommandRef.current) return;
             try {
+                const hasPendingAudio = collectProjectAudioSourceRefs(latestTracksRef.current).some(({ sourceId }) => (
+                    !getProjectAudioAssetRef(
+                        projectAssetRefsRef.current,
+                        sourceId,
+                        collabSessionId,
+                        projectWorkspaceIdRef.current
+                    )
+                ));
+                if (hasPendingAudio) {
+                    const syncAudio = syncProjectAudioToCloudRef.current;
+                    if (!syncAudio) return;
+                    console.info('[CloudAutoSave] Syncing pending project audio before metadata.');
+                    await syncAudio(collabSessionId, projectWorkspaceIdRef.current);
+                }
+
                 const clockSnapshot = getTransportClockSnapshot();
                 const snapshot = createProjectDataSnapshot({
                     ...transport,
@@ -3857,11 +3980,12 @@ const App: React.FC = () => {
                 }, projectName);
                 const integrityResult = repairProjectData(snapshot, { source: 'cloud-autosave' });
 
-                await supabase.from('projects').update({
+                const { error } = await supabase.from('projects').update({
                     data: integrityResult.project as any,
                     name: projectName,
                     updated_at: new Date().toISOString()
                 }).eq('id', collabSessionId);
+                if (error) throw error;
 
                 lastCloudSaveCommandRef.current = projectCommandCount;
             } catch (err) {
@@ -3895,6 +4019,9 @@ const App: React.FC = () => {
             scaleType: 'minor'
         }));
         setCollabSessionId(null);
+        projectAssetRefsRef.current = [];
+        projectWorkspaceIdRef.current = undefined;
+        lastCloudSaveCommandRef.current = 0;
         window.history.pushState({}, '', window.location.pathname);
         setActiveModal(null);
         engineAdapter.stop(true);
@@ -3938,7 +4065,7 @@ const App: React.FC = () => {
                 const wsIds = memberships.map(m => m.workspace_id);
                 const { data: projects } = await supabase
                     .from('projects')
-                    .select('id, name, updated_at, data')
+                    .select('id, name, updated_at, workspace_id, data')
                     .in('workspace_id', wsIds)
                     .order('updated_at', { ascending: false });
                 if (projects) setCloudProjects(projects);
@@ -3951,7 +4078,7 @@ const App: React.FC = () => {
     }, [user]);
 
     // Load a specific cloud project from the browser panel
-    const handleLoadCloudProject = useCallback(async (project: { id: string; name: string; data: any }) => {
+    const handleLoadCloudProject = useCallback(async (project: { id: string; name: string; workspace_id?: string; data: any }) => {
         setShowProjectBrowser(false);
         setLoadingProject(true);
         setLoadingMessage('Cargando proyecto...');
@@ -3961,7 +4088,9 @@ const App: React.FC = () => {
             if (project.data && Object.keys(project.data).length > 0) {
                 const integrityReport = await hydrateProjectData(project.data as unknown as ProjectData, project.name, {
                     source: 'open-project',
-                    rememberReport: true
+                    rememberReport: true,
+                    projectId: project.id,
+                    workspaceId: project.workspace_id
                 });
                 if (integrityReport.issueCount > 0) {
                     console.warn('Project integrity repaired during open.', integrityReport);
@@ -3983,21 +4112,14 @@ const App: React.FC = () => {
             setLoadingProject(true);
             setLoadingMessage("Leyendo proyecto...");
 
-            const result = await platformService.openProjectFile();
+            const result = await platformService.openPortableProjectFile();
             if (!result) {
                 setLoadingProject(false);
                 setLoadingMessage("");
                 return; // User cancelled
             }
 
-            const { text, filename } = result;
-            const projectData: ProjectData = JSON.parse(text);
-
-            const nameFromDisk = filename.replace(/\.esp$/i, '');
-            const integrityReport = await hydrateProjectData(projectData, nameFromDisk || projectData.name, {
-                source: 'open-project',
-                rememberReport: true
-            });
+            const integrityReport = await hydratePortableProjectFile(result.blob, result.filename);
             if (integrityReport.issueCount > 0) {
                 console.warn('Project integrity repaired during open.', integrityReport);
                 alert(summarizeProjectIntegrityReport(integrityReport, 'Proyecto abierto'));
@@ -4036,9 +4158,7 @@ const App: React.FC = () => {
                 }, projectName);
                 const integrityResult = repairProjectData(projectMetadata, { source: 'save-project' });
                 rememberProjectIntegrityReport(integrityResult.report);
-                const jsonString = JSON.stringify(integrityResult.project, null, 2);
-
-                await platformService.saveProject(jsonString, projectName);
+                await savePortableProjectSnapshot(integrityResult.project, projectName);
             } catch (err) {
                 console.error("Error al descargar proyecto:", err);
                 alert("Hubo un error al intentar descargar el proyecto.");
@@ -4046,123 +4166,210 @@ const App: React.FC = () => {
                 setLoadingProject(false);
             }
         }, 50);
-    }, [transport, projectName, createProjectDataSnapshot]);
+    }, [transport, projectName, createProjectDataSnapshot, savePortableProjectSnapshot]);
+
+    const syncProjectAudioToCloud = useCallback(async (projectId: string, workspaceId?: string) => {
+        const activeSync = projectAudioSyncPromiseRef.current;
+        if (activeSync) {
+            if (activeSync.projectId === projectId) return activeSync.promise;
+            await activeSync.promise;
+        }
+
+        const syncPromise = (async () => {
+            projectWorkspaceIdRef.current = workspaceId;
+
+            const sourceRefs = collectProjectAudioSourceRefs(latestTracksRef.current);
+            const pendingRefs = sourceRefs.filter(({ sourceId }) => {
+                const existing = getProjectAudioAssetRef(
+                    projectAssetRefsRef.current,
+                    sourceId,
+                    projectId,
+                    workspaceId
+                );
+                return !existing;
+            });
+
+            if (pendingRefs.length === 0) return;
+
+            setLoadingMessage(`Sincronizando ${pendingRefs.length} archivo${pendingRefs.length === 1 ? '' : 's'} de audio...`);
+            const availableAssets = await loadProjectAudioAssets(
+                latestTracksRef.current,
+                async (sourceId) => (await assetDb.getFile(sourceId)) || null
+            );
+            const pendingAssets = new Map(
+                pendingRefs.map(({ sourceId }) => {
+                    const asset = availableAssets.get(sourceId);
+                    if (!asset) {
+                        throw new Error(`No se encontró la fuente local ${sourceId}.`);
+                    }
+                    return [sourceId, asset] as const;
+                })
+            );
+
+            const committedRefs = await audioResourceManager.commitProjectAudio(
+                projectId,
+                workspaceId,
+                pendingAssets
+            );
+            projectAssetRefsRef.current = mergeProjectAudioAssetRefs(
+                projectAssetRefsRef.current,
+                committedRefs
+            );
+        })();
+
+        projectAudioSyncPromiseRef.current = { projectId, promise: syncPromise };
+        try {
+            await syncPromise;
+        } finally {
+            if (projectAudioSyncPromiseRef.current?.promise === syncPromise) {
+                projectAudioSyncPromiseRef.current = null;
+            }
+        }
+    }, []);
+    syncProjectAudioToCloudRef.current = syncProjectAudioToCloud;
 
     const handleSaveProject = useCallback(async () => {
         if (isReadOnly) {
             alert("No tienes permisos para guardar cambios en este proyecto.");
             return;
         }
-        
+
         setLoadingProject(true);
         setLoadingMessage("Guardando metadatos...");
 
-        setTimeout(async () => {
-            try {
-                if (transport.isPlaying) {
-                    engineAdapter.pause();
-                    setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
-                    isPlayingRef.current = false;
-                    pauseResumeArmedRef.current = false;
-                }
-                const clockSnapshot = getTransportClockSnapshot();
-                const projectMetadata = createProjectDataSnapshot({
-                    ...transport,
-                    isPlaying: false,
-                    isRecording: false,
-                    currentBar: clockSnapshot.currentBar,
-                    currentBeat: clockSnapshot.currentBeat,
-                    currentSixteenth: clockSnapshot.currentSixteenth
-                }, projectName);
-                const integrityResult = repairProjectData(projectMetadata, { source: 'save-project' });
-                rememberProjectIntegrityReport(integrityResult.report);
-                const jsonString = JSON.stringify(integrityResult.project, null, 2);
+        const buildSaveResult = () => {
+            const clockSnapshot = getTransportClockSnapshot();
+            const projectMetadata = createProjectDataSnapshot({
+                ...transport,
+                isPlaying: false,
+                isRecording: false,
+                currentBar: clockSnapshot.currentBar,
+                currentBeat: clockSnapshot.currentBeat,
+                currentSixteenth: clockSnapshot.currentSixteenth
+            }, projectName);
+            const result = repairProjectData(projectMetadata, { source: 'save-project' });
+            rememberProjectIntegrityReport(result.report);
+            return result;
+        };
 
-                if (collabSessionId) {
-                    setLoadingMessage("Guardando en la nube...");
-                    try {
-                        const { error } = await supabase.from('projects').update({
-                            data: integrityResult.project as any,
-                            name: projectName,
-                            updated_at: new Date().toISOString()
-                        }).eq('id', collabSessionId);
-                        
-                        if (error) throw error;
-                    } catch (e) {
-                        console.error('Error saving to cloud:', e);
-                        alert("Error al guardar en la nube.");
-                    }
-                } else if (user) {
-                    setLoadingMessage("Creando proyecto en la nube...");
-                    try {
-                        const { data: memberships, error: wsError } = await supabase
-                            .from('workspace_members')
-                            .select('workspace_id')
-                            .eq('user_id', user.id)
-                            .limit(1);
-                        
-                        if (wsError || !memberships || memberships.length === 0) throw new Error("Workspace no encontrado");
-                        
-                        const workspaceId = memberships[0].workspace_id;
-                        const { data: newProjectId, error: createError } = await supabase.rpc('create_project_with_limit', {
-                            p_name: projectName,
-                            p_workspace_id: workspaceId,
-                            p_bpm: 120,
-                            p_sample_rate: 44100,
-                            p_is_public: false,
-                            p_data: integrityResult.project as any
-                        });
-                        
-                        if (createError) {
-                            if (createError.message.includes('limit reached')) {
-                                alert('Has alcanzado el límite de proyectos para la capa gratuita. Por favor actualiza tu plan o elimina un proyecto.');
-                            } else {
-                                throw createError;
-                            }
-                            // Don't fallback to local, just stop
-                            setLoadingProject(false);
-                            setLoadingMessage("");
-                            return;
-                        }
-                        
-                        if (!newProjectId) throw new Error("No se devolvió ID del proyecto");
-                        
-                        setCollabSessionId(newProjectId as string);
-                        window.history.pushState({}, '', `${window.location.pathname}?project=${newProjectId}`);
-                    } catch (e) {
-                        console.error('Error creating cloud project:', e);
-                        alert("Error al crear el proyecto en la nube. Se descargará localmente como respaldo.");
-                        const result = await platformService.saveProject(jsonString, projectName);
-                        if (result.success && result.filePath) {
-                            setProjectName(result.filePath);
-                        }
-                    }
-                } else {
-                    setLoadingMessage("Escribiendo disco...");
-                    // FIX: Update Project Name from Save Result
-                    const result = await platformService.saveProject(jsonString, projectName);
-                    if (result.success && result.filePath) {
-                        setProjectName(result.filePath);
-                    }
-                }
-                
-                // Fallback result for integrity report (using success always if cloud or fallback done without throw)
-                if (integrityResult.report.issueCount > 0) {
-                    console.warn('Project integrity repaired during save.', integrityResult.report);
-                    alert(summarizeProjectIntegrityReport(integrityResult.report, 'Proyecto guardado'));
-                }
+        let finalIntegrityResult: ReturnType<typeof repairProjectData> | null = null;
 
-            } catch (e) {
-                console.error("Failed to save project", e);
-                alert("Error al guardar.");
-            } finally {
-                setLoadingProject(false);
-                setLoadingMessage("");
-                setActiveModal(null);
-                setShowFileMenu(false);
+        try {
+            if (transport.isPlaying) {
+                engineAdapter.pause();
+                setTransport((prev: TransportState) => ({ ...prev, isPlaying: false }));
+                isPlayingRef.current = false;
+                pauseResumeArmedRef.current = false;
             }
-        }, 20);
-    }, [createProjectDataSnapshot, projectName, rememberProjectIntegrityReport, transport, isReadOnly]);
+
+            if (collabSessionId) {
+                await syncProjectAudioToCloud(collabSessionId, projectWorkspaceIdRef.current);
+                finalIntegrityResult = buildSaveResult();
+                setLoadingMessage("Guardando proyecto en la nube...");
+                const { error } = await supabase.from('projects').update({
+                    data: finalIntegrityResult.project as any,
+                    name: projectName,
+                    updated_at: new Date().toISOString()
+                }).eq('id', collabSessionId);
+                if (error) throw error;
+                lastCloudSaveCommandRef.current = projectCommandCount;
+            } else if (user) {
+                setLoadingMessage("Creando proyecto en la nube...");
+                const { data: memberships, error: wsError } = await supabase
+                    .from('workspace_members')
+                    .select('workspace_id')
+                    .eq('user_id', user.id)
+                    .limit(1);
+
+                if (wsError || !memberships || memberships.length === 0) {
+                    throw wsError || new Error("Workspace no encontrado");
+                }
+
+                const workspaceId = memberships[0].workspace_id;
+                projectWorkspaceIdRef.current = workspaceId;
+                const provisionalResult = buildSaveResult();
+                const { data: newProjectId, error: createError } = await supabase.rpc('create_project_with_limit', {
+                    p_name: projectName,
+                    p_workspace_id: workspaceId,
+                    p_bpm: transport.bpm,
+                    p_sample_rate: audioSettings.sampleRate,
+                    p_is_public: false,
+                    p_data: provisionalResult.project as any
+                });
+
+                if (createError?.message.includes('limit reached')) {
+                    alert('Has alcanzado el límite de proyectos para la capa gratuita. Por favor actualiza tu plan o elimina un proyecto.');
+                    return;
+                }
+                if (createError) throw createError;
+                if (typeof newProjectId !== 'string' || newProjectId.length === 0) {
+                    throw new Error("No se devolvió un ID de proyecto válido");
+                }
+
+                await syncProjectAudioToCloud(newProjectId, workspaceId);
+                finalIntegrityResult = buildSaveResult();
+                setLoadingMessage("Confirmando proyecto en la nube...");
+                const { error: finalizeError } = await supabase.from('projects').update({
+                    data: finalIntegrityResult.project as any,
+                    name: projectName,
+                    updated_at: new Date().toISOString()
+                }).eq('id', newProjectId);
+                if (finalizeError) throw finalizeError;
+
+                setCollabSessionId(newProjectId);
+                lastCloudSaveCommandRef.current = projectCommandCount;
+                const nextUrl = new URL(window.location.href);
+                nextUrl.search = '';
+                nextUrl.searchParams.set('project', newProjectId);
+                window.history.pushState({}, '', `${nextUrl.pathname}${nextUrl.search}`);
+            } else {
+                finalIntegrityResult = buildSaveResult();
+                setLoadingMessage("Escribiendo disco...");
+                const result = await savePortableProjectSnapshot(finalIntegrityResult.project, projectName);
+                if (result.canceled) return;
+                if (!result.success) throw new Error('No se pudo guardar el proyecto local.');
+                if (result.filePath) setProjectName(result.filePath);
+            }
+
+            if (finalIntegrityResult && finalIntegrityResult.report.issueCount > 0) {
+                console.warn('Project integrity repaired during save.', finalIntegrityResult.report);
+                alert(summarizeProjectIntegrityReport(finalIntegrityResult.report, 'Proyecto guardado'));
+            }
+        } catch (error) {
+            console.error("Failed to save project", error);
+            if (collabSessionId || user) {
+                try {
+                    const backup = buildSaveResult();
+                    const result = await savePortableProjectSnapshot(backup.project, projectName);
+                    alert(result.success
+                        ? "No se pudo confirmar el guardado cloud. Se creó un proyecto .esp portable con su audio local verificado."
+                        : "No se pudo guardar en la nube ni crear el respaldo local.");
+                } catch (backupError) {
+                    console.error('Local backup after cloud failure also failed.', backupError);
+                    alert("No se pudo guardar en la nube ni crear el respaldo local.");
+                }
+            } else {
+                alert("No se pudo guardar el proyecto.");
+            }
+        } finally {
+            setLoadingProject(false);
+            setLoadingMessage("");
+            setActiveModal(null);
+            setShowFileMenu(false);
+        }
+    }, [
+        audioSettings.sampleRate,
+        collabSessionId,
+        createProjectDataSnapshot,
+        isReadOnly,
+        projectCommandCount,
+        projectName,
+        rememberProjectIntegrityReport,
+        savePortableProjectSnapshot,
+        syncProjectAudioToCloud,
+        transport,
+        user
+    ]);
 
     const assignClipToSessionSlot = useCallback((track: Track, sceneIndex: number, clip: Clip): Track => {
         const safeSceneIndex = Math.max(0, Math.min(7, sceneIndex));
@@ -4220,6 +4427,9 @@ const App: React.FC = () => {
 
     const importAudioSources = useCallback(async (sources: ImportAudioSource[]) => {
         if (sources.length === 0) return;
+        if (isReadOnly) {
+            throw new Error('Este proyecto está en modo visor y no permite importar audio.');
+        }
 
         const unsupportedNames = sources
             .filter((source) => !isSupportedAudioImportName(source.name))
@@ -4258,7 +4468,7 @@ const App: React.FC = () => {
                 try {
                     const blobToPersist = loadedSource.persistBlob
                         || new Blob([loadedSource.arrayBuffer], { type: 'application/octet-stream' });
-                    sourceId = await assetDb.saveFile(blobToPersist);
+                    sourceId = await assetDb.saveFile(blobToPersist, loadedSource.arrayBuffer);
                 } catch (persistError) {
                     console.warn(`Asset cache unavailable for ${source.name}`, persistError);
                 }
@@ -4326,7 +4536,7 @@ const App: React.FC = () => {
             ];
             alert(`Se importaron ${validTracks.length} de ${sources.length} archivos. Fallos: ${failureDetails.join(' | ')}`);
         }
-    }, [appendTracks, buildAudioClipFromBuffer, tracks.length, getProgressiveTrackColor]);
+    }, [appendTracks, buildAudioClipFromBuffer, tracks.length, getProgressiveTrackColor, isReadOnly]);
 
     const importLibraryEntryIntoDestination = useCallback(async (
         entry: ScannedFileEntry,
@@ -4346,7 +4556,10 @@ const App: React.FC = () => {
         const decoded = await engineAdapter.decodeAudioData(fileData.data.slice(0));
         let sourceId: string | undefined;
         try {
-            sourceId = await assetDb.saveFile(new Blob([fileData.data], { type: 'application/octet-stream' }));
+            sourceId = await assetDb.saveFile(
+                new Blob([fileData.data], { type: 'application/octet-stream' }),
+                fileData.data
+            );
         } catch (persistError) {
             console.warn('Asset cache unavailable for library import', persistError);
         }
@@ -4969,7 +5182,7 @@ const App: React.FC = () => {
             }
         }
     }, [sessionHealthSnapshot]);
-    const isScannerImmersive = showNoteScanner;
+    const isScannerImmersive = showNoteScanner || isStandaloneMusicSurface;
     const selectedTrack = tracks.find((track) => track.id === selectedTrackId) || null;
     const selectedAudioTrack = selectedTrack?.type === TrackType.AUDIO ? selectedTrack : null;
     const selectedTrackPunchRange = useMemo(() => (
@@ -5085,6 +5298,7 @@ const App: React.FC = () => {
         <div
             data-audio-priority={globalAudioPriority.mode}
             data-visual-performance={visualPerformance.mode}
+            data-desktop-product={desktopProduct}
             className={`daw-immersive-shell flex flex-col h-screen w-screen bg-[#111218] text-daw-text font-sans overflow-hidden selection:bg-daw-ruby selection:text-white ${visualPerformance.reduceAnimations ? 'audio-priority-reduced' : ''}`}
         >
 
@@ -5188,7 +5402,7 @@ const App: React.FC = () => {
 
             <div className={`flex-1 overflow-hidden flex relative transition-[transform,opacity,filter] duration-500 ease-[cubic-bezier(0.22,0.84,0.26,1)] ${showSettings ? 'blur-[1px] scale-[0.995] pointer-events-none select-none brightness-90' : ''}`}>
 
-                <div className="w-[50px] bg-[#1a1a1a] border-r border-daw-border flex flex-col items-center py-3 gap-3 z-[100] shrink-0 relative shadow-xl">
+                {!isStandaloneMusicSurface && <div className="w-[50px] bg-[#1a1a1a] border-r border-daw-border flex flex-col items-center py-3 gap-3 z-[100] shrink-0 relative shadow-xl">
                     {/* ... Sidebar Icons (unchanged) ... */}
                     <div className="relative group" ref={fileMenuRef}>
                         <button onClick={() => setShowFileMenu(!showFileMenu)} className={`w-10 h-10 flex items-center justify-center rounded-sm transition-all duration-100 relative ${showFileMenu ? 'bg-[#333] text-white' : 'text-gray-400 hover:text-white hover:bg-[#222]'}`} title="Menú de Proyecto">
@@ -5221,7 +5435,7 @@ const App: React.FC = () => {
                     <div className="flex flex-col gap-2 w-full items-center">
                         <SidebarItem icon={Search} label="Navegador de Archivos" active={showBrowser} onClick={() => toggleToolPanel('browser')} />
                         <SidebarItem icon={Sparkles} label="Generador AI" active={showAI} onClick={() => toggleToolPanel('ai')} color="text-daw-cyan" />
-                        <SidebarItem icon={Piano} label="Piano Score" active={showNoteScanner} onClick={() => toggleToolPanel('scanner')} color="text-daw-violet" />
+                        <SidebarItem icon={Piano} label="Score-fi y Keys-fi" active={showNoteScanner} onClick={() => toggleToolPanel('scanner')} color="text-daw-violet" />
                     </div>
                     <div className="w-6 h-px bg-white/5 my-1"></div>
                     <div className="flex flex-col gap-2 w-full items-center">
@@ -5350,7 +5564,7 @@ const App: React.FC = () => {
 
                     <input type="file" ref={fileInputRef} className="hidden" multiple accept={AUDIO_IMPORT_ACCEPT} onChange={handleFileImport} />
                     {/* Project Input removed in favor of platformService */}
-                </div>
+                </div>}
 
 
                 {!isScannerImmersive && hasLoadedAISidebar && (
@@ -5387,12 +5601,13 @@ const App: React.FC = () => {
                                 <React.Suspense fallback={<div className="h-full w-full bg-[#0a0a0d]" />}>
                                     <PianoScoreWorkspace
                                         isOpen={showNoteScanner}
+                                        surfaceMode={desktopProduct === 'score' ? 'score' : desktopProduct === 'keys' ? 'keys' : 'combined'}
                                         tracks={tracks}
                                         transport={transport}
                                         selectedTrackId={selectedTrackId}
                                         selectedClipId={selectedClipId}
                                         scoreWorkspaces={scoreWorkspaces}
-                                        onClose={closeAllToolPanels}
+                                        onClose={handleCloseMusicSurface}
                                         onScoreWorkspacesChange={setScoreWorkspaces}
                                         onCreateMidiTrackFromScore={handleCreateMidiTrackFromScan}
                                         onUpdateMidiClip={handleUpdateMidiClipFromScore}
@@ -5750,14 +5965,14 @@ const App: React.FC = () => {
                     </div>
                 </div>
             )}
-            <Modal isOpen={activeModal === 'recovery'} onClose={handleDiscardRecoverySnapshot} title="RecuperaciÃ³n automÃ¡tica">
+            <Modal isOpen={activeModal === 'recovery'} onClose={handleDiscardRecoverySnapshot} title="Recuperación automática">
                 <div className="flex flex-col gap-4">
                     <p className="text-xs text-gray-300 leading-relaxed">
-                        Detectamos un cierre inesperado en la sesiÃ³n anterior. Puedes restaurar el Ãºltimo autosave para continuar donde te quedaste.
+                        Detectamos un cierre inesperado en la sesión anterior. Puedes restaurar el último autosave para continuar donde te quedaste.
                     </p>
                     {recoverySnapshot && (
                         <div className="rounded-sm border border-white/10 bg-white/[0.03] p-3">
-                            <div className="text-[10px] uppercase tracking-wider text-gray-500">Ãšltimo autosave</div>
+                            <div className="text-[10px] uppercase tracking-wider text-gray-500">Último autosave</div>
                             <div className="mt-2 text-xs text-gray-200 font-semibold">{recoverySnapshot.projectName}</div>
                             <div className="mt-1 text-[10px] text-gray-500 font-mono">{new Date(recoverySnapshot.timestamp).toLocaleString()}</div>
                             <div className="mt-1 text-[10px] text-daw-cyan">{recoverySnapshot.reason}</div>
@@ -5819,7 +6034,7 @@ const App: React.FC = () => {
                                         {entry.failureReason || lastPhase?.message || 'Sin detalle adicional.'}
                                     </div>
                                     <div className="mt-2 text-[10px] text-gray-500 font-mono">
-                                        Phase: {lastPhase?.phase || 'unknown'}{typeof lastPhase?.barTime === 'number' ? ` Â· bar ${lastPhase.barTime.toFixed(3)}` : ''}
+                                        Phase: {lastPhase?.phase || 'unknown'}{typeof lastPhase?.barTime === 'number' ? ` · bar ${lastPhase.barTime.toFixed(3)}` : ''}
                                     </div>
                                 </div>
                             );
@@ -5902,11 +6117,11 @@ const App: React.FC = () => {
                                             <span className={route.active ? 'text-emerald-300' : 'text-gray-500'}>
                                                 {route.active ? 'Active' : 'Idle'}
                                             </span>
-                                            <span className="text-gray-500">Â·</span>
+                                            <span className="text-gray-500">·</span>
                                             <span className="text-gray-300">{route.mode}</span>
                                             {route.pendingFinalize && (
                                                 <>
-                                                    <span className="text-gray-500">Â·</span>
+                                                    <span className="text-gray-500">·</span>
                                                     <span className="text-amber-200">Pending Finalize</span>
                                                 </>
                                             )}
@@ -5938,7 +6153,7 @@ const App: React.FC = () => {
                     </div>
                 </div>
             </Modal>
-            <Modal isOpen={activeModal === 'new-project-confirm'} onClose={() => setActiveModal(null)} title="Nuevo Proyecto"><div className="flex flex-col gap-6"><div className="flex items-start gap-4 text-white"><div className="p-3 bg-daw-ruby/20 rounded-full shrink-0"><AlertTriangle className="text-daw-ruby" size={24} /></div><div><h3 className="font-bold text-lg mb-1">Ã‚Â¿Deseas guardar los cambios?</h3><p className="text-gray-400 text-xs leading-relaxed">Si continúas sin guardar, perderás todo el trabajo actual para abrir un espacio de trabajo limpio.</p></div></div><div className="flex flex-col gap-2"><button onClick={async () => { await handleSaveProject(); resetProjectToEmpty(); }} className="w-full flex items-center justify-between px-4 py-3 bg-white text-black rounded-sm font-bold text-xs hover:bg-gray-200 transition-all group"><div className="flex items-center gap-3"><Save size={16} /><span>GUARDAR Y CREAR NUEVO</span></div></button><button onClick={resetProjectToEmpty} className="w-full flex items-center gap-3 px-4 py-3 bg-[#222] text-daw-ruby border border-daw-ruby/30 rounded-sm font-bold text-xs hover:bg-daw-ruby hover:text-white transition-all"><Trash2 size={16} /><span>CONTINUAR SIN GUARDAR</span></button><button onClick={() => setActiveModal(null)} className="w-full py-2 text-gray-500 hover:text-white text-[10px] font-bold uppercase tracking-widest mt-2">CANCELAR</button></div></div></Modal>
+            <Modal isOpen={activeModal === 'new-project-confirm'} onClose={() => setActiveModal(null)} title="Nuevo Proyecto"><div className="flex flex-col gap-6"><div className="flex items-start gap-4 text-white"><div className="p-3 bg-daw-ruby/20 rounded-full shrink-0"><AlertTriangle className="text-daw-ruby" size={24} /></div><div><h3 className="font-bold text-lg mb-1">¿Deseas guardar los cambios?</h3><p className="text-gray-400 text-xs leading-relaxed">Si continúas sin guardar, perderás todo el trabajo actual para abrir un espacio de trabajo limpio.</p></div></div><div className="flex flex-col gap-2"><button onClick={async () => { await handleSaveProject(); resetProjectToEmpty(); }} className="w-full flex items-center justify-between px-4 py-3 bg-white text-black rounded-sm font-bold text-xs hover:bg-gray-200 transition-all group"><div className="flex items-center gap-3"><Save size={16} /><span>GUARDAR Y CREAR NUEVO</span></div></button><button onClick={resetProjectToEmpty} className="w-full flex items-center gap-3 px-4 py-3 bg-[#222] text-daw-ruby border border-daw-ruby/30 rounded-sm font-bold text-xs hover:bg-daw-ruby hover:text-white transition-all"><Trash2 size={16} /><span>CONTINUAR SIN GUARDAR</span></button><button onClick={() => setActiveModal(null)} className="w-full py-2 text-gray-500 hover:text-white text-[10px] font-bold uppercase tracking-widest mt-2">CANCELAR</button></div></div></Modal>
 
             <Modal isOpen={activeModal === 'project-os'} onClose={() => setActiveModal(null)} title="Project OS">
                 <ProjectOsPanel

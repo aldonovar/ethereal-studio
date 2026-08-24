@@ -145,10 +145,12 @@ class AssetDatabase {
         });
     }
 
-    async saveFile(file: File | Blob): Promise<string> {
+    async saveFile(file: File | Blob, knownBuffer?: ArrayBuffer): Promise<string> {
         if (!this.db) await this.init();
 
-        const buffer = await file.arrayBuffer();
+        const buffer = knownBuffer && knownBuffer.byteLength === file.size
+            ? knownBuffer
+            : await file.arrayBuffer();
         const hash = await this.computeHash(buffer);
 
         return await new Promise((resolve, reject) => {
