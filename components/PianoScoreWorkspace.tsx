@@ -16,7 +16,12 @@ import {
     normalizeClipNotes
 } from '../services/pianoScoreConversionService';
 import { pianoTranscriptionService } from '../services/pianoTranscriptionService';
-import { buildScoreTransportFrame, timeline16thToBarTime } from '../services/scoreTransportSyncService';
+import {
+    buildScoreTransportFrame,
+    scoreSource16thToGlobalTimeline16th,
+    timeline16thToBarTime,
+    type ScoreClipTransportContext
+} from '../services/scoreTransportSyncService';
 import { getTransportClockSnapshot, subscribeTransportClock, type TransportClockSnapshot } from '../services/transportClockStore';
 import { midiService } from '../services/MidiService';
 import ScoreViewport from './ScoreViewport';
@@ -80,6 +85,11 @@ const secondaryAccentButtonClass = `${buttonBase} border-daw-violet/35 bg-daw-vi
 const successButtonClass = `${buttonBase} border-emerald-400/35 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/18`;
 const dangerButtonClass = `${buttonBase} border-rose-400/35 bg-rose-500/10 text-rose-200 hover:bg-rose-500/18`;
 
+const isAbortError = (error: unknown): boolean => (
+    (typeof DOMException !== 'undefined' && error instanceof DOMException && error.name === 'AbortError')
+    || (error instanceof Error && /abort|cancel/i.test(`${error.name} ${error.message}`))
+);
+
 const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
     isOpen,
     tracks,
@@ -98,8 +108,11 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
     onSeekToBarTime
 }) => {
     const rootRef = useRef<HTMLDivElement>(null);
+    const transcriptionAbortRef = useRef<AbortController | null>(null);
+    const transcriptionRequestIdRef = useRef(0);
     const [transportClock, setTransportClock] = useState<TransportClockSnapshot>(() => getTransportClockSnapshot());
     const [draftNotes, setDraftNotes] = useState<Note[] | null>(null);
+    const [transcriptionGridBpm, setTranscriptionGridBpm] = useState<number | null>(null);
     const [isScanning, setIsScanning] = useState(false);
     const [scanProgressMessage, setScanProgressMessage] = useState('');
     const [scanError, setScanError] = useState<string | null>(null);
@@ -149,16 +162,55 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
     useEffect(() => subscribeTransportClock(() => setTransportClock(getTransportClockSnapshot())), []);
 
     useEffect(() => {
+        transcriptionRequestIdRef.current += 1;
+        transcriptionAbortRef.current?.abort();
+        transcriptionAbortRef.current = null;
+        setIsScanning(false);
         setDraftNotes(null);
+        setTranscriptionGridBpm(null);
         setScanError(null);
         setScanProgressMessage('');
         setSelectedNoteKey(null);
     }, [currentWorkspace?.id]);
 
+    useEffect(() => {
+        if (isOpen) return;
+        transcriptionRequestIdRef.current += 1;
+        transcriptionAbortRef.current?.abort();
+        transcriptionAbortRef.current = null;
+        setIsScanning(false);
+    }, [isOpen]);
+
+    useEffect(() => () => {
+        transcriptionRequestIdRef.current += 1;
+        transcriptionAbortRef.current?.abort();
+        transcriptionAbortRef.current = null;
+    }, []);
+
     const sourceClipContext = useMemo(() => {
         if (!currentWorkspace) return null;
         return findClipById(tracks, currentWorkspace.source.trackId, currentWorkspace.source.clipId);
     }, [currentWorkspace, tracks]);
+
+    const scoreClipTransportContext = useMemo<ScoreClipTransportContext | undefined>(() => {
+        if (!sourceClipContext) return undefined;
+        const { clip, track } = sourceClipContext;
+        const sourceOriginalBpm = Math.max(1, clip.originalBpm ?? 120);
+        return {
+            sourceKind: track.type === TrackType.AUDIO ? 'audio' : 'midi',
+            clipStartBar: clip.start,
+            clipLengthBars: clip.length,
+            clipOffsetBars: clip.offset,
+            playbackRate: clip.playbackRate,
+            sourceOriginalBpm,
+            noteGridBpm: transcriptionGridBpm ?? transport.bpm,
+            projectBpm: transport.bpm,
+            isWarped: clip.isWarped,
+            clipTransposeSemitones: clip.transpose,
+            trackTransposeSemitones: track.transpose,
+            masterTransposeSemitones: transport.masterTranspose
+        };
+    }, [sourceClipContext, transcriptionGridBpm, transport.bpm, transport.masterTranspose]);
 
     const derivedClipContext = useMemo(() => {
         if (!currentWorkspace || currentWorkspace.source.kind !== 'audio-derived') return null;
@@ -190,8 +242,15 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
     }, [currentWorkspace, transport.bpm, transport.timeSignature, workingNotes]);
 
     const transportFrame = useMemo(() => {
-        return buildScoreTransportFrame(workingNotes, transportClock, transport.timeSignature);
-    }, [transport.timeSignature, transportClock, workingNotes]);
+        return buildScoreTransportFrame(
+            workingNotes,
+            transportClock,
+            transport.timeSignature,
+            transport.bpm,
+            Date.now(),
+            scoreClipTransportContext
+        );
+    }, [scoreClipTransportContext, transport.bpm, transport.timeSignature, transportClock, workingNotes]);
 
     const setWorkspace = useCallback((updater: (workspace: ScoreWorkspaceState) => ScoreWorkspaceState) => {
         if (!currentWorkspace) return;
@@ -319,9 +378,33 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
     }, [selectedNoteKey, setWorkspace]);
 
     const handleSeekToTimeline16th = useCallback((timeline16th: number) => {
-        const barTime = timeline16thToBarTime(timeline16th, transport.timeSignature);
+        const globalTimeline16th = scoreClipTransportContext
+            ? scoreSource16thToGlobalTimeline16th(timeline16th, scoreClipTransportContext)
+            : timeline16th;
+        const barTime = timeline16thToBarTime(
+            globalTimeline16th,
+            scoreClipTransportContext ? [4, 4] : transport.timeSignature
+        );
         void onSeekToBarTime(barTime);
-    }, [onSeekToBarTime, transport.timeSignature]);
+    }, [onSeekToBarTime, scoreClipTransportContext, transport.timeSignature]);
+
+    const handleCancelTranscription = useCallback(() => {
+        if (!transcriptionAbortRef.current) return;
+        transcriptionRequestIdRef.current += 1;
+        transcriptionAbortRef.current.abort();
+        transcriptionAbortRef.current = null;
+        setIsScanning(false);
+        setScanError(null);
+        setScanProgressMessage('Transcripcion cancelada. Puedes volver a analizar cuando quieras.');
+    }, []);
+
+    const handleCloseWorkspace = useCallback(() => {
+        transcriptionRequestIdRef.current += 1;
+        transcriptionAbortRef.current?.abort();
+        transcriptionAbortRef.current = null;
+        setIsScanning(false);
+        onClose();
+    }, [onClose]);
 
     const handleRunTranscription = useCallback(async () => {
         if (!sourceClipContext || sourceClipContext.track.type !== TrackType.AUDIO || !sourceClipContext.clip.buffer) {
@@ -329,6 +412,11 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
             return;
         }
 
+        transcriptionAbortRef.current?.abort();
+        const controller = new AbortController();
+        const requestId = transcriptionRequestIdRef.current + 1;
+        transcriptionRequestIdRef.current = requestId;
+        transcriptionAbortRef.current = controller;
         setScanError(null);
         setIsScanning(true);
         setScanProgressMessage('Preparando transcripcion de piano...');
@@ -337,8 +425,14 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                 sourceClipContext.clip.buffer,
                 transport.bpm,
                 {},
-                (progress) => setScanProgressMessage(progress.message)
+                (progress) => {
+                    if (requestId !== transcriptionRequestIdRef.current || controller.signal.aborted) return;
+                    setScanProgressMessage(progress.message);
+                },
+                controller.signal
             );
+            if (requestId !== transcriptionRequestIdRef.current || controller.signal.aborted) return;
+            setTranscriptionGridBpm(transport.bpm);
             setDraftNotes(result.notes);
             setWorkspace((workspace) => ({
                 ...workspace,
@@ -347,10 +441,19 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                 lastAverageConfidence: result.averageConfidence
             }));
         } catch (error) {
+            if (requestId !== transcriptionRequestIdRef.current) return;
+            if (controller.signal.aborted || isAbortError(error)) {
+                setScanError(null);
+                setScanProgressMessage('Transcripcion cancelada. Puedes volver a analizar cuando quieras.');
+                return;
+            }
             console.error('Piano transcription failed', error);
             setScanError(error instanceof Error ? error.message : 'No se pudo transcribir el clip.');
         } finally {
-            setIsScanning(false);
+            if (requestId === transcriptionRequestIdRef.current) {
+                transcriptionAbortRef.current = null;
+                setIsScanning(false);
+            }
         }
     }, [setWorkspace, sourceClipContext, transport.bpm]);
 
@@ -440,7 +543,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                             </div>
                         </div>
                         <button
-                            onClick={onClose}
+                            onClick={handleCloseWorkspace}
                             className="flex h-8 w-8 items-center justify-center rounded-sm border border-white/10 bg-white/5 text-gray-400 hover:text-white hover:border-white/30"
                             title="Cerrar Piano Score"
                         >
@@ -580,7 +683,7 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                             </span>
                         )}
                         <button
-                            onClick={onClose}
+                            onClick={handleCloseWorkspace}
                             className="flex h-8 w-8 items-center justify-center rounded-sm border border-white/10 bg-white/5 text-gray-400 hover:text-white hover:border-white/30"
                             title="Cerrar Piano Score"
                         >
@@ -595,7 +698,9 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                     <select
                         value={activeSourceId}
                         onChange={(event) => handleSourceChange(event.target.value)}
-                        className="h-9 min-w-[320px] rounded-sm border border-white/10 bg-[#0b1018] px-3 text-xs text-gray-200 outline-none focus:border-daw-violet/50"
+                        disabled={isScanning}
+                        aria-label="Fuente de Piano Score"
+                        className="h-9 min-w-[320px] rounded-sm border border-white/10 bg-[#0b1018] px-3 text-xs text-gray-200 outline-none focus:border-daw-violet/50 disabled:cursor-not-allowed disabled:opacity-45"
                     >
                         {sourceCandidates.map((candidate) => (
                             <option key={candidate.id} value={candidate.id}>{candidate.label}</option>
@@ -641,6 +746,17 @@ const PianoScoreWorkspace: React.FC<PianoScoreWorkspaceProps> = ({
                         >
                             {isScanning ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
                             {isScanning ? 'Analizando...' : hasDerivedMidiTarget ? 'Reanalizar Piano' : 'Analizar Piano'}
+                        </button>
+                    )}
+
+                    {isScanning && (
+                        <button
+                            onClick={handleCancelTranscription}
+                            className={dangerButtonClass}
+                            aria-label="Cancelar transcripcion de piano"
+                        >
+                            <X size={14} />
+                            Cancelar analisis
                         </button>
                     )}
 
