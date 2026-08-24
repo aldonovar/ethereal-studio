@@ -7,6 +7,7 @@ import {
   DirectoryScanRequest,
   FileData,
   ScannedFileEntry,
+  SelectedAudioFile,
 } from '../types';
 import { desktopRuntimeService } from './desktopRuntimeService';
 
@@ -207,33 +208,40 @@ class PlatformService {
 
   // --- File System ---
 
-  public async selectAudioFiles(): Promise<FileData[] | null> {
+  public async selectAudioFiles(): Promise<SelectedAudioFile[] | null> {
     const host = desktopRuntimeService.api;
     if (host) {
       try {
         const files = await host.selectFiles();
-        const normalized: FileData[] = [];
+        const normalized: SelectedAudioFile[] = [];
 
         files.forEach((file) => {
-          const rawData: unknown = (file as FileData & { data: unknown }).data;
-          const data = this.toArrayBuffer(rawData);
+          const path = typeof file.path === 'string' ? file.path.trim() : '';
+          if (!path) {
+            console.warn(`Skipping file without a readable path: ${file.name}`);
+            return;
+          }
 
-          if (!data) {
+          const rawData: unknown = file.data;
+          const data = rawData ? this.toArrayBuffer(rawData) : undefined;
+
+          if (rawData && !data) {
             console.warn(`Skipping file with unsupported binary payload: ${file.name}`);
             return;
           }
 
           normalized.push({
             name: file.name,
-            path: file.path,
-            data
+            path,
+            size: file.size,
+            ...(data ? { data } : {})
           });
         });
 
         return normalized;
       } catch (error) {
         console.error("Desktop file selection failed", error);
-        return [];
+        throw error;
       }
     }
     return null;

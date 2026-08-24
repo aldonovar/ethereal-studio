@@ -542,6 +542,13 @@ export interface FileData {
   path?: string;
 }
 
+export interface SelectedAudioFile {
+  name: string;
+  path: string;
+  size?: number;
+  data?: ArrayBuffer;
+}
+
 export type ExportAudioFormat = 'wav' | 'aiff' | 'flac' | 'mp3';
 
 export interface AudioTranscodeRequest {
@@ -635,7 +642,7 @@ export interface DesktopHostAPI {
   persistAuthSession?: (session: DesktopAuthSessionPayload) => Promise<DesktopAuthLaunchResult>;
   clearPersistedAuthSession?: () => Promise<{ success: boolean; error?: string }>;
   onHubRefresh?: (callback: () => void) => (() => void);
-  selectFiles: () => Promise<FileData[]>;
+  selectFiles: () => Promise<SelectedAudioFile[]>;
   readFileFromPath?: (filePath: string) => Promise<FileData | null>;
   selectDirectory?: () => Promise<string | null>;
   scanDirectoryFiles?: (request: DirectoryScanRequest) => Promise<ScannedFileEntry[]>;

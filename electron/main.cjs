@@ -3,7 +3,6 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
 const {
     BENCHMARK_MODE,
     parseLiveCaptureConfig,
@@ -19,6 +18,16 @@ const {
     toPublicAuthError,
     validatePendingRequest
 } = require('./desktop-auth.cjs');
+const {
+    SUPPORTED_AUDIO_IMPORT_EXTENSIONS,
+    resolveFfmpegBinary,
+    runFfmpeg: runFfmpegProcess
+} = require('./ffmpeg-runtime.cjs');
+const {
+    MAX_AUDIO_IMPORT_FILE_BYTES,
+    assertAudioImportFileSize,
+    assertAudioImportSelectionCount
+} = require('./audio-import-policy.cjs');
 
 const AUDIO_FORMATS = new Set(['wav', 'aiff', 'flac', 'mp3']);
 const AUDIO_MIME_BY_FORMAT = {
@@ -28,17 +37,16 @@ const AUDIO_MIME_BY_FORMAT = {
     mp3: 'audio/mpeg'
 };
 
-let ffmpegBinaryPath = null;
+let ffmpegStaticPath = null;
 try {
-    const resolved = require('ffmpeg-static');
-    if (resolved) {
-        ffmpegBinaryPath = resolved.includes('app.asar')
-            ? resolved.replace('app.asar', 'app.asar.unpacked')
-            : resolved;
-    }
+    ffmpegStaticPath = require('ffmpeg-static');
 } catch (error) {
-    ffmpegBinaryPath = null;
     console.warn('FFmpeg static binary is not available.', error);
+}
+
+const ffmpegBinaryPath = resolveFfmpegBinary({ staticPath: ffmpegStaticPath });
+if (!ffmpegBinaryPath) {
+    console.warn('No usable FFmpeg binary was found. Advanced import fallback is disabled.');
 }
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -73,40 +81,11 @@ const getCodecArgs = (format, bitDepth) => {
     return ['-c:a', 'libmp3lame', '-b:a', '320k', '-joint_stereo', '1'];
 };
 
-const runFfmpeg = (args) => new Promise((resolve, reject) => {
-    if (!ffmpegBinaryPath) {
-        reject(new Error('FFmpeg no esta disponible en esta build.'));
-        return;
-    }
-
-    const child = spawn(ffmpegBinaryPath, args, {
-        windowsHide: true
-    });
-
-    let stderr = '';
-
-    child.stderr.on('data', (chunk) => {
-        stderr += chunk.toString();
-    });
-
-    child.on('error', (error) => {
-        reject(error);
-    });
-
-    child.on('close', (code) => {
-        if (code === 0) {
-            resolve();
-            return;
-        }
-
-        reject(new Error(stderr || `FFmpeg finalizo con codigo ${code}.`));
-    });
-});
+const runFfmpeg = (args) => runFfmpegProcess(ffmpegBinaryPath, args);
 
 const DIRECTORY_SCAN_LIMIT = 10000;
-const MAX_DIRECT_FILE_READ_BYTES = 512 * 1024 * 1024;
-const MAX_IMPORT_FILE_BYTES = 256 * 1024 * 1024;
-const MAX_IMPORT_BATCH_BYTES = 1024 * 1024 * 1024;
+const MAX_DIRECT_FILE_READ_BYTES = MAX_AUDIO_IMPORT_FILE_BYTES;
+const MAX_IMPORT_FILE_BYTES = MAX_AUDIO_IMPORT_FILE_BYTES;
 
 let mainWindow = null;
 let hubWindow = null;
@@ -382,13 +361,14 @@ ipcMain.handle('select-files', async (event) => {
         title: 'Importar Audio',
         properties: ['openFile', 'multiSelections'],
         filters: [
-            { name: 'Audio Files', extensions: ['wav', 'mp3', 'aif', 'aiff', 'flac', 'ogg'] }
+            { name: 'Audio Files', extensions: [...SUPPORTED_AUDIO_IMPORT_EXTENSIONS] }
         ]
     });
 
     if (filePaths && filePaths.length > 0) {
+        assertAudioImportSelectionCount(filePaths.length);
+
         const files = [];
-        let accumulatedSize = 0;
 
         for (const filePath of filePaths) {
             const stats = await fs.stat(filePath);
@@ -396,22 +376,12 @@ ipcMain.handle('select-files', async (event) => {
                 continue;
             }
 
-            if (stats.size > MAX_IMPORT_FILE_BYTES) {
-                throw new Error(`El archivo ${path.basename(filePath)} supera el limite de 256 MB.`);
-            }
-
-            accumulatedSize += stats.size;
-            if (accumulatedSize > MAX_IMPORT_BATCH_BYTES) {
-                throw new Error('La importacion supera el limite de 1 GB por lote. Importa menos archivos por tanda.');
-            }
-
-            const buffer = await fs.readFile(filePath);
-            const data = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+            assertAudioImportFileSize(path.basename(filePath), stats.size);
 
             files.push({
                 name: path.basename(filePath),
                 path: filePath,
-                data
+                size: stats.size
             });
         }
 
@@ -489,6 +459,9 @@ ipcMain.handle('transcode-audio', async (_event, payload) => {
     if (!inputBuffer || inputBuffer.length === 0) {
         return { success: false, error: 'No se recibieron datos de audio validos.' };
     }
+    if (inputBuffer.length > MAX_IMPORT_FILE_BYTES) {
+        return { success: false, error: 'El audio supera el limite de 512 MB para transcodificacion.' };
+    }
 
     const requestedBitDepth = clamp(Number(payload?.bitDepth || 16), 16, 32);
     const bitDepth = requestedBitDepth <= 16 ? 16 : requestedBitDepth <= 24 ? 24 : 32;
@@ -504,6 +477,7 @@ ipcMain.handle('transcode-audio', async (_event, payload) => {
 
         const codecArgs = getCodecArgs(format, bitDepth);
         const ffmpegArgs = [
+            '-nostdin',
             '-hide_banner',
             '-loglevel', 'error',
             '-y',
