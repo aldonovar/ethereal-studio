@@ -68,5 +68,15 @@ else
   exit 1
 fi
 
+electron_args=()
+if [[ "$(uname -s)" == "Linux" ]] \
+  && command -v busctl >/dev/null 2>&1 \
+  && busctl --user status org.freedesktop.secrets >/dev/null 2>&1; then
+  # Chromium cannot infer a secure password store from every Wayland compositor
+  # (notably Hyprland). Select the active Secret Service explicitly so Electron
+  # safeStorage persists OAuth sessions instead of falling back to basic_text.
+  electron_args+=(--password-store=gnome-libsecret)
+fi
+
 cd "${app_root}"
-exec "${electron_bin}" "${app_root}/electron/main.cjs" "$@" >>"${log_file}" 2>&1
+exec "${electron_bin}" "${electron_args[@]}" "${app_root}/electron/main.cjs" "$@" >>"${log_file}" 2>&1

@@ -37,6 +37,8 @@ requireSnippet(supabase, 'detectSessionInUrl: false', 'Renderer URL session dete
 requireSnippet(supabase, "flowType: 'pkce'", 'Supabase renderer client is not configured for PKCE.');
 requireSnippet(supabase, 'isDawfiSupabaseUrl', 'The renderer does not fail closed on a mismatched Supabase project.');
 requireSnippet(launcher, "read_public_env_value 'VITE_SUPABASE_ANON_KEY'", 'The launcher cannot load the public Supabase key used for PKCE exchange.');
+requireSnippet(launcher, '--password-store=gnome-libsecret', 'The Linux launcher does not select Secret Service when the compositor cannot infer a secure store.');
+requireSnippet(launcher, 'org.freedesktop.secrets', 'The Linux launcher does not verify that Secret Service is active.');
 requireSnippet(launcher, '"$@"', 'The launcher discards custom-protocol callback arguments.');
 requireSnippet(linuxDesktopEntry, 'Exec=/home/aldonovar/.local/bin/daw-fi %u', 'The Linux launcher does not accept a callback URL.');
 requireSnippet(linuxDesktopEntry, 'MimeType=x-scheme-handler/dawfi;x-scheme-handler/hollowbits;', 'The Linux desktop entry does not register DAW-fi callback protocols.');
