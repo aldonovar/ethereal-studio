@@ -70,6 +70,15 @@ fi
 
 electron_args=()
 if [[ "$(uname -s)" == "Linux" ]] \
+  && [[ "${XDG_SESSION_TYPE:-}" == "wayland" || -n "${WAYLAND_DISPLAY:-}" ]]; then
+  # Electron/Chromium can still probe Vulkan on native Wayland even when the
+  # compositor cannot provide a compatible surface. Keep accelerated raster
+  # rendering, but disable only Vulkan so a failed probe cannot leave a black
+  # DAW window on Hyprland.
+  electron_args+=(--disable-features=Vulkan)
+fi
+
+if [[ "$(uname -s)" == "Linux" ]] \
   && command -v busctl >/dev/null 2>&1 \
   && busctl --user status org.freedesktop.secrets >/dev/null 2>&1; then
   # Chromium cannot infer a secure password store from every Wayland compositor

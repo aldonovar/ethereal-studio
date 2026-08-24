@@ -30,6 +30,7 @@ const {
     assertAudioImportFileSize,
     assertAudioImportSelectionCount
 } = require('./audio-import-policy.cjs');
+const { createRendererVisibilityGuard } = require('./renderer-visibility-guard.cjs');
 
 const AUDIO_FORMATS = new Set(['wav', 'aiff', 'flac', 'mp3']);
 const AUDIO_MIME_BY_FORMAT = {
@@ -546,6 +547,34 @@ const loadRendererSurface = (win, surface, params = {}) => {
 
 const attachWindowLifecycle = (win, role) => {
     const notifyState = () => broadcastWindowState(win);
+    const rendererVisibilityGuard = createRendererVisibilityGuard({
+        win,
+        role,
+        logger: ({ role: safeRole, cause, stage, action }) => {
+            console.error(
+                `[main:${safeRole}-renderer-visibility] cause=${cause} stage=${stage} action=${action}`
+            );
+        },
+        showNativeFallback: async ({ retry, close }) => {
+            if (!win || win.isDestroyed()) return;
+            const result = await dialog.showMessageBox(win, {
+                type: 'error',
+                title: 'DAW-fi',
+                message: 'La interfaz de DAW-fi no pudo mostrarse.',
+                detail: 'La recuperación automática terminó sin contenido visible. Puedes reintentar la carga o cerrar esta ventana.',
+                buttons: ['Reintentar carga', 'Cerrar DAW-fi'],
+                defaultId: 0,
+                cancelId: 1,
+                noLink: true
+            });
+            if (!win || win.isDestroyed()) return;
+            if (result.response === 0) {
+                retry();
+            } else {
+                close();
+            }
+        }
+    });
     win.on('maximize', notifyState);
     win.on('unmaximize', notifyState);
     win.on('minimize', notifyState);
@@ -555,6 +584,7 @@ const attachWindowLifecycle = (win, role) => {
     win.webContents.on('did-finish-load', notifyState);
     win.on('unresponsive', () => {
         logMainError(`${role}-window-unresponsive`, 'Renderer no responde.');
+        void rendererVisibilityGuard.handleUnresponsive();
     });
     win.webContents.on('render-process-gone', (_event, details) => {
         logMainError(`${role}-render-process-gone`, `${details.reason} (exitCode=${details.exitCode})`);
