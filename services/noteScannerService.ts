@@ -1,4 +1,5 @@
 import { Note } from '../types';
+import { buildPolaritySafeMono } from './transcriptionPrecisionService';
 
 export type NoteScanMode = 'quick' | 'polyphonic';
 
@@ -161,23 +162,11 @@ const computeRms = (buffer: Float32Array): number => {
 };
 
 const toMono = (buffer: AudioBuffer): Float32Array => {
-    if (buffer.numberOfChannels <= 1) {
-        return new Float32Array(buffer.getChannelData(0));
-    }
-
-    const length = buffer.length;
-    const mono = new Float32Array(length);
-    const inv = 1 / buffer.numberOfChannels;
-
-    for (let i = 0; i < length; i++) {
-        let sum = 0;
-        for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-            sum += buffer.getChannelData(ch)[i];
-        }
-        mono[i] = sum * inv;
-    }
-
-    return mono;
+    const channels = Array.from(
+        { length: buffer.numberOfChannels },
+        (_, channel) => buffer.getChannelData(channel)
+    );
+    return buildPolaritySafeMono(channels);
 };
 
 const enforcePolyphony = (notes: DetectedMidiNote[], maxPolyphony: number): DetectedMidiNote[] => {
