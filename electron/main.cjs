@@ -10,12 +10,14 @@ const {
     sanitizeBenchmarkStatus
 } = require('./benchmarkBridge.cjs');
 const {
+    DAWFI_AUTH_CONTRACT,
     DesktopAuthError,
     createAuthorizationRequest,
     exchangeAuthorizationCode,
     parseAuthorizationCallback,
     parseTokenResponse,
     toPublicAuthError,
+    validatePublishableKey,
     validatePendingRequest
 } = require('./desktop-auth.cjs');
 const {
@@ -711,13 +713,13 @@ const createEditorWindow = (request = {}) => {
     return editorWindow;
 };
 
-const AUTH_PROTOCOL = 'dawfi';
-const LEGACY_AUTH_PROTOCOL = 'hollowbits';
-const DESKTOP_AUTH_REDIRECT_URI = `${AUTH_PROTOCOL}://auth/callback`;
+const AUTH_PROTOCOL = new URL(DAWFI_AUTH_CONTRACT.desktopRedirectUri).protocol.slice(0, -1);
+const LEGACY_AUTH_PROTOCOL = new URL(DAWFI_AUTH_CONTRACT.legacyDesktopRedirectUri).protocol.slice(0, -1);
+const DESKTOP_AUTH_REDIRECT_URI = DAWFI_AUTH_CONTRACT.desktopRedirectUri;
 const DESKTOP_AUTH_SUPABASE_URL = process.env.DAWFI_SUPABASE_URL
     || process.env.VITE_SUPABASE_URL
-    || 'https://xnmkoybfuyivmiuckpxs.supabase.co';
-const DESKTOP_AUTH_CLIENT_ID = process.env.DAWFI_DESKTOP_OAUTH_CLIENT_ID || '';
+    || DAWFI_AUTH_CONTRACT.supabaseUrl;
+const DESKTOP_AUTH_PUBLISHABLE_KEY = process.env.DAWFI_SUPABASE_PUBLISHABLE_KEY || '';
 const AUTH_PENDING_FILE = 'desktop-auth-pending.bin';
 const AUTH_SESSION_FILE = 'desktop-auth-session.bin';
 const AUTH_REQUEST_TIMEOUT_MS = 15_000;
@@ -901,6 +903,7 @@ const processAuthCallback = async (rawUrl) => {
             session = await exchangeAuthorizationCode({
                 pending,
                 code: parsed.code,
+                publishableKey: DESKTOP_AUTH_PUBLISHABLE_KEY,
                 signal: controller.signal
             });
         } finally {
@@ -965,9 +968,9 @@ ipcMain.handle('desktop-show-hub', async () => {
 
 ipcMain.handle('desktop-open-auth', async (_event, request) => {
     try {
+        validatePublishableKey(DESKTOP_AUTH_PUBLISHABLE_KEY);
         const authRequest = createAuthorizationRequest({
             supabaseUrl: DESKTOP_AUTH_SUPABASE_URL,
-            clientId: DESKTOP_AUTH_CLIENT_ID,
             redirectUri: DESKTOP_AUTH_REDIRECT_URI
         });
         const pending = {

@@ -1,0 +1,16 @@
+{
+  "projectRef": "xnmkoybfuyivmiuckpxs",
+  "supabaseUrl": "https://xnmkoybfuyivmiuckpxs.supabase.co",
+  "socialAuthorizationPath": "/auth/v1/authorize",
+  "socialTokenPath": "/auth/v1/token",
+  "oauthAuthorizationPath": "/auth/v1/oauth/authorize",
+  "oauthTokenPath": "/auth/v1/oauth/token",
+  "oauthConsentPath": "/oauth/consent",
+  "authCallbackPath": "/auth/callback",
+  "siteOrigin": "https://hollowbits.com",
+  "canonicalAuthOrigin": "https://play.hollowbits.com",
+  "desktopBridgeUrl": "https://www.hollowbits.com/desktop-auth",
+  "desktopRedirectUri": "dawfi://auth/callback",
+  "legacyDesktopRedirectUri": "hollowbits://auth/callback",
+  "scopes": ["openid", "email", "profile"]
+}

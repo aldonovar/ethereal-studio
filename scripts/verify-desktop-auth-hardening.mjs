@@ -7,7 +7,10 @@ const main = read('electron/main.cjs');
 const authModule = read('electron/desktop-auth.cjs');
 const authStore = read('stores/authStore.ts');
 const supabase = read('services/supabase.ts');
+const authContractModule = read('services/authContract.ts');
+const authContract = JSON.parse(read('config/dawfi-auth.json'));
 const launcher = read('scripts/launch-dawfi-desktop.sh');
+const linuxDesktopEntry = read('packaging/linux/daw-fi.desktop');
 const packageJson = JSON.parse(read('package.json'));
 const failures = [];
 
@@ -19,23 +22,46 @@ const forbidSnippet = (source, snippet, message) => {
   if (source.includes(snippet)) failures.push(message);
 };
 
-requireSnippet(main, "const AUTH_PROTOCOL = 'dawfi';", 'DAW-fi protocol is not the primary auth protocol.');
+requireSnippet(main, 'DAWFI_AUTH_CONTRACT.desktopRedirectUri', 'DAW-fi protocol is not read from the shared auth contract.');
 requireSnippet(main, 'safeStorage', 'Electron safeStorage is not used for Desktop auth persistence.');
 requireSnippet(main, 'createAuthorizationRequest({', 'Desktop auth does not start with an OAuth authorization request.');
 requireSnippet(main, 'exchangeAuthorizationCode({', 'Desktop auth does not exchange the one-time code in main.');
 requireSnippet(authModule, "code_challenge_method', 'S256'", 'Desktop OAuth does not require S256 PKCE.');
+requireSnippet(authModule, 'DAWFI_AUTH_CONTRACT.socialAuthorizationPath', 'Desktop still depends on a separately registered OAuth Server client.');
+requireSnippet(authModule, 'DAWFI_AUTH_CONTRACT.desktopBridgeUrl', 'Desktop social login does not use the protected HTTPS bridge.');
+requireSnippet(authModule, "authorizeUrl.searchParams.set('provider', 'google')", 'Desktop does not use the restored Google social provider.');
+requireSnippet(authModule, "payload?.role === 'anon'", 'Desktop does not reject privileged Supabase keys.');
+requireSnippet(authModule, 'normalizeDawfiSupabaseOrigin', 'Desktop OAuth does not reject another Supabase project.');
 requireSnippet(authModule, "new Set(['code', 'state'])", 'Successful callbacks are not restricted to code and state.');
 requireSnippet(supabase, 'detectSessionInUrl: false', 'Renderer URL session detection is still enabled.');
 requireSnippet(supabase, "flowType: 'pkce'", 'Supabase renderer client is not configured for PKCE.');
-requireSnippet(launcher, "read_public_env_value 'DAWFI_DESKTOP_OAUTH_CLIENT_ID'", 'The launcher cannot load the public Desktop OAuth client identifier.');
+requireSnippet(supabase, 'isDawfiSupabaseUrl', 'The renderer does not fail closed on a mismatched Supabase project.');
+requireSnippet(launcher, "read_public_env_value 'VITE_SUPABASE_ANON_KEY'", 'The launcher cannot load the public Supabase key used for PKCE exchange.');
+requireSnippet(launcher, '"$@"', 'The launcher discards custom-protocol callback arguments.');
+requireSnippet(linuxDesktopEntry, 'Exec=/home/aldonovar/.local/bin/daw-fi %u', 'The Linux launcher does not accept a callback URL.');
+requireSnippet(linuxDesktopEntry, 'MimeType=x-scheme-handler/dawfi;x-scheme-handler/hollowbits;', 'The Linux desktop entry does not register DAW-fi callback protocols.');
 
-forbidSnippet(main, 'DESKTOP_AUTH_BRIDGE_URL', 'The legacy web auth bridge is still active.');
+forbidSnippet(main, 'DAWFI_DESKTOP_OAUTH_CLIENT_ID', 'Desktop still blocks on a manually registered OAuth Server client.');
 forbidSnippet(main, "webContents.send('desktop-auth-callback', url)", 'A raw callback URL is still sent to the renderer.');
 forbidSnippet(authStore, 'hashParams.get(\'access_token\')', 'Renderer still reads an access token from a URL fragment.');
 forbidSnippet(authStore, 'hashParams.get(\'refresh_token\')', 'Renderer still reads a refresh token from a URL fragment.');
 forbidSnippet(authStore, 'exchangeCodeForSession(code)', 'Renderer still exchanges a callback code outside the main-process broker.');
 forbidSnippet(supabase, 'document.cookie', 'Supabase sessions are still persisted in JavaScript cookies.');
 forbidSnippet(launcher, 'source "${env_file}"', 'The launcher sources the entire env file into the privileged process.');
+
+if (authContract.projectRef !== 'xnmkoybfuyivmiuckpxs') {
+  failures.push('The shared auth contract points to the wrong Supabase project.');
+}
+if (authContract.supabaseUrl !== 'https://xnmkoybfuyivmiuckpxs.supabase.co') {
+  failures.push('The shared auth contract contains the wrong Supabase origin.');
+}
+if (authContract.socialAuthorizationPath !== '/auth/v1/authorize') {
+  failures.push('The shared auth contract does not use Supabase social login for Desktop.');
+}
+if (authContract.desktopBridgeUrl !== 'https://www.hollowbits.com/desktop-auth') {
+  failures.push('The shared auth contract contains the wrong Desktop HTTPS bridge.');
+}
+requireSnippet(authContractModule, 'assertDawfiSupabaseUrl', 'The shared auth contract has no strict project assertion.');
 
 const registeredSchemes = packageJson.build?.protocols
   ?.flatMap((protocol) => protocol.schemes ?? []) ?? [];

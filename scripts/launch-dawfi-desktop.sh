@@ -12,8 +12,8 @@ env_file="${app_root}/.env.local"
 mkdir -p "${state_dir}"
 
 # Electron's main process does not read Vite env files. Import only the public,
-# explicitly allowlisted Desktop OAuth settings; never source arbitrary shell
-# content or load the browser publishable key into the privileged process.
+# explicitly allowlisted Supabase URL and publishable/anon key; never source
+# arbitrary shell content or any service-role credential.
 read_public_env_value() {
   local key="$1"
   local line
@@ -42,9 +42,12 @@ if [[ -z "${DAWFI_SUPABASE_URL:-}" ]]; then
   [[ -z "${DAWFI_SUPABASE_URL}" ]] || export DAWFI_SUPABASE_URL
 fi
 
-if [[ -z "${DAWFI_DESKTOP_OAUTH_CLIENT_ID:-}" ]]; then
-  DAWFI_DESKTOP_OAUTH_CLIENT_ID="$(read_public_env_value 'DAWFI_DESKTOP_OAUTH_CLIENT_ID' || true)"
-  [[ -z "${DAWFI_DESKTOP_OAUTH_CLIENT_ID}" ]] || export DAWFI_DESKTOP_OAUTH_CLIENT_ID
+if [[ -z "${DAWFI_SUPABASE_PUBLISHABLE_KEY:-}" ]]; then
+  DAWFI_SUPABASE_PUBLISHABLE_KEY="$(read_public_env_value 'DAWFI_SUPABASE_PUBLISHABLE_KEY' || true)"
+  if [[ -z "${DAWFI_SUPABASE_PUBLISHABLE_KEY}" ]]; then
+    DAWFI_SUPABASE_PUBLISHABLE_KEY="$(read_public_env_value 'VITE_SUPABASE_ANON_KEY' || true)"
+  fi
+  [[ -z "${DAWFI_SUPABASE_PUBLISHABLE_KEY}" ]] || export DAWFI_SUPABASE_PUBLISHABLE_KEY
 fi
 
 if [[ ! -f "${dist_entry}" ]]; then
@@ -66,4 +69,4 @@ else
 fi
 
 cd "${app_root}"
-exec "${electron_bin}" "${app_root}/electron/main.cjs" >>"${log_file}" 2>&1
+exec "${electron_bin}" "${app_root}/electron/main.cjs" "$@" >>"${log_file}" 2>&1

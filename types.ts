@@ -603,6 +603,7 @@ export type DesktopAuthErrorCode =
   | 'AUTH_DESKTOP_HANDOFF_REPLAYED'
   | 'AUTH_NETWORK_UNAVAILABLE'
   | 'AUTH_CONFIGURATION_MISSING'
+  | 'AUTH_CONFIGURATION_MISMATCH'
   | 'AUTH_USER_CANCELLED';
 
 export interface DesktopAuthSessionPayload {

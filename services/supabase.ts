@@ -1,10 +1,17 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from '../types/supabase';
+import { assertDawfiSupabaseUrl, isDawfiSupabaseUrl } from './authContract';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+const hasCloudCredentials = Boolean(supabaseUrl && supabaseAnonKey);
+const hasExpectedCloudProject = isDawfiSupabaseUrl(supabaseUrl);
+
+export const isSupabaseConfigured = hasCloudCredentials && hasExpectedCloudProject;
+export const supabaseConfigurationError = hasCloudCredentials && !hasExpectedCloudProject
+  ? 'DAW-fi está configurado con un proyecto Supabase distinto al autorizado.'
+  : null;
 
 // The desktop app is local-first. Missing cloud configuration must never stop
 // React from mounting, and an offline build must never send auth data to a
@@ -17,8 +24,10 @@ const offlineCloudFetch: typeof fetch = async () => new Response(
   }
 );
 
-const runtimeSupabaseUrl = supabaseUrl || 'http://127.0.0.1:1';
-const runtimeSupabaseAnonKey = supabaseAnonKey || 'dawfi-local-only';
+const runtimeSupabaseUrl = isSupabaseConfigured
+  ? assertDawfiSupabaseUrl(supabaseUrl!)
+  : 'http://127.0.0.1:1';
+const runtimeSupabaseAnonKey = isSupabaseConfigured ? supabaseAnonKey! : 'dawfi-local-only';
 
 const isElectronRenderer = typeof window !== 'undefined' && Boolean(window.electron);
 const volatileDesktopStorage = new Map<string, string>();
