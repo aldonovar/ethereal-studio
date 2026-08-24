@@ -4,6 +4,7 @@ const DAWFI_AUTH_CONTRACT = require('../config/dawfi-auth.json');
 const DEFAULT_AUTH_TTL_MS = 5 * 60 * 1000;
 const MAX_TOKEN_LENGTH = 32 * 1024;
 const OAUTH_CODE_PATTERN = /^[A-Za-z0-9._~-]{8,4096}$/;
+const TOKEN_WHITESPACE_OR_CONTROL_PATTERN = /[\s\u0000-\u001f\u007f]/u;
 
 class DesktopAuthError extends Error {
     constructor(code, message) {
@@ -268,6 +269,13 @@ const validatePendingRequest = (pending, now = Date.now()) => {
     return pending;
 };
 
+const isValidTokenValue = (value, { minLength = 1 } = {}) => (
+    typeof value === 'string'
+    && value.length >= minLength
+    && value.length <= MAX_TOKEN_LENGTH
+    && !TOKEN_WHITESPACE_OR_CONTROL_PATTERN.test(value)
+);
+
 const parseTokenResponse = (payload, now = Date.now()) => {
     const accessToken = typeof payload?.access_token === 'string' ? payload.access_token : '';
     const refreshToken = typeof payload?.refresh_token === 'string' ? payload.refresh_token : '';
@@ -275,14 +283,23 @@ const parseTokenResponse = (payload, now = Date.now()) => {
     const tokenType = typeof payload?.token_type === 'string' ? payload.token_type.toLowerCase() : '';
 
     if (
-        accessToken.length < 20
-        || accessToken.length > MAX_TOKEN_LENGTH
-        || refreshToken.length < 20
-        || refreshToken.length > MAX_TOKEN_LENGTH
+        !isValidTokenValue(accessToken, { minLength: 20 })
+        // OAuth refresh tokens are opaque. Their entropy and representation are
+        // enforced by the trusted issuer, so Desktop must not impose a made-up
+        // minimum length that rejects valid Supabase sessions.
+        || !isValidTokenValue(refreshToken)
         || !Number.isFinite(expiresIn)
         || expiresIn <= 0
         || tokenType !== 'bearer'
     ) {
+        console.warn('[desktop-auth] Rejected token response shape.', {
+            hasAccessToken: accessToken.length > 0,
+            accessTokenLength: accessToken.length,
+            hasRefreshToken: refreshToken.length > 0,
+            refreshTokenLength: refreshToken.length,
+            expiresInValid: Number.isFinite(expiresIn) && expiresIn > 0,
+            tokenTypePresent: typeof payload?.token_type === 'string' && payload.token_type.length > 0,
+        });
         fail('AUTH_CALLBACK_INVALID', 'El servidor devolvió una sesión incompleta.');
     }
 
@@ -290,7 +307,7 @@ const parseTokenResponse = (payload, now = Date.now()) => {
         access_token: accessToken,
         refresh_token: refreshToken,
         expires_in: expiresIn,
-        expires_at: Math.floor(now / 1000) + Math.floor(expiresIn),
+        expires_at: Math.floor(Number(now) / 1000) + Math.floor(expiresIn),
         token_type: 'bearer',
     };
 };

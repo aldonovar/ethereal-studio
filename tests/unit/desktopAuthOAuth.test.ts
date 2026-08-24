@@ -135,6 +135,101 @@ describe('DAW-fi Desktop OAuth handoff', () => {
     });
   });
 
+  it('accepts the exact token lengths observed in the restored Supabase project', async () => {
+    const request = desktopAuth.createAuthorizationRequest(CONFIG);
+    const accessToken = 'a'.repeat(1_499);
+    const refreshToken = 'r'.repeat(12);
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_in: 3_600,
+      expires_at: 3_602,
+      token_type: 'bearer',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await expect(desktopAuth.exchangeAuthorizationCode({
+      pending: request,
+      code: 'opaque-code-123',
+      publishableKey: ANON_KEY,
+      fetchImpl: fetchMock,
+      now: 2_000,
+    })).resolves.toMatchObject({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      token_type: 'bearer',
+    });
+  });
+
+  it('accepts the current short opaque Supabase refresh-token representation', () => {
+    const session = desktopAuth.parseTokenResponse({
+      access_token: 'a'.repeat(64),
+      refresh_token: 'opaque-id-12',
+      expires_in: 3_600,
+      token_type: 'bearer',
+    }, 2_000);
+
+    expect(session.refresh_token).toBe('opaque-id-12');
+  });
+
+  it.each([
+    ['empty', ''],
+    ['whitespace', 'opaque token'],
+    ['control character', 'opaque\ntoken'],
+  ])('rejects an invalid %s refresh token', (_label, refreshToken) => {
+    expect(() => desktopAuth.parseTokenResponse({
+      access_token: 'a'.repeat(64),
+      refresh_token: refreshToken,
+      expires_in: 3_600,
+      token_type: 'bearer',
+    })).toThrowError(expect.objectContaining({ code: 'AUTH_CALLBACK_INVALID' }));
+  });
+
+  it.each([
+    ['short access token', { access_token: 'a'.repeat(19), refresh_token: 'r'.repeat(12) }],
+    ['oversized access token', { access_token: 'a'.repeat((32 * 1024) + 1), refresh_token: 'r'.repeat(12) }],
+    ['oversized refresh token', { access_token: 'a'.repeat(64), refresh_token: 'r'.repeat((32 * 1024) + 1) }],
+    ['non-string refresh token', { access_token: 'a'.repeat(64), refresh_token: 12 }],
+    ['missing expiry metadata', { access_token: 'a'.repeat(64), refresh_token: 'r'.repeat(12), expires_in: undefined }],
+    ['non-positive expiry metadata', { access_token: 'a'.repeat(64), refresh_token: 'r'.repeat(12), expires_in: 0 }],
+    ['non-string token type', { access_token: 'a'.repeat(64), refresh_token: 'r'.repeat(12), token_type: null }],
+    ['non-bearer token type', { access_token: 'a'.repeat(64), refresh_token: 'r'.repeat(12), token_type: 'mac' }],
+  ])('rejects a %s response', (_label, payload) => {
+    expect(() => desktopAuth.parseTokenResponse({
+      expires_in: 3_600,
+      token_type: 'bearer',
+      ...payload,
+    })).toThrowError(expect.objectContaining({ code: 'AUTH_CALLBACK_INVALID' }));
+  });
+
+  it('never includes token values in rejected-response diagnostics', () => {
+    const accessToken = `access-secret-${'a'.repeat(48)}`;
+    const refreshToken = 'refresh secret';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      expect(() => desktopAuth.parseTokenResponse({
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        expires_in: 3_600,
+        token_type: 'bearer',
+      })).toThrowError(expect.objectContaining({ code: 'AUTH_CALLBACK_INVALID' }));
+
+      const diagnostics = JSON.stringify(warn.mock.calls);
+      expect(diagnostics).not.toContain(accessToken);
+      expect(diagnostics).not.toContain(refreshToken);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still rejects a successful-looking response without both tokens', () => {
+    expect(() => desktopAuth.parseTokenResponse({
+      access_token: 'a'.repeat(64),
+      expires_in: 3_600,
+      token_type: 'bearer',
+    })).toThrowError(expect.objectContaining({ code: 'AUTH_CALLBACK_INVALID' }));
+  });
+
   it('rejects expired and replayed authorization codes with typed errors', async () => {
     const expired = desktopAuth.createAuthorizationRequest({ ...CONFIG, ttlMs: 50 });
     await expect(desktopAuth.exchangeAuthorizationCode({
