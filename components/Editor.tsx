@@ -25,6 +25,8 @@ interface EditorProps {
     transport?: EditorTransportView;
 }
 
+type SelectedTrackEditorProps = Omit<EditorProps, 'track'> & { track: Track };
+
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 const formatSnapLabel = (gridSize: number): string => {
@@ -55,7 +57,19 @@ const formatBars = (value: number | null | undefined): string => {
     return Number.isFinite(value) ? Number(value).toFixed(3) : '0.000';
 };
 
-const Editor: React.FC<EditorProps> = ({
+const EmptyEditor: React.FC = () => (
+    <div className="h-full flex flex-col items-center justify-center bg-[#121214] text-daw-muted select-none border-t border-daw-border relative overflow-hidden">
+        <div className="absolute inset-0 opacity-5" style={{ backgroundImage: 'radial-gradient(#ffffff 1px, transparent 1px)', backgroundSize: '30px 30px' }}></div>
+
+        <div className="p-6 bg-[#1a1a1d] rounded-full mb-6 shadow-2xl border border-white/5 animate-pulse">
+            <Activity size={48} className="text-daw-ruby" />
+        </div>
+        <span className="text-sm font-black tracking-[0.3em] opacity-80 uppercase text-white">Ninguna Selección</span>
+        <span className="text-[10px] opacity-40 mt-2 font-mono uppercase tracking-widest">Selecciona una Pista para Editar</span>
+    </div>
+);
+
+const SelectedTrackEditor: React.FC<SelectedTrackEditorProps> = ({
     track,
     selectedClipId = null,
     audioViewState = null,
@@ -119,23 +133,7 @@ const Editor: React.FC<EditorProps> = ({
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, []);
 
-    if (!track) {
-        return (
-            <div className="h-full flex flex-col items-center justify-center bg-[#121214] text-daw-muted select-none border-t border-daw-border relative overflow-hidden">
-                {/* Background Decoration */}
-                <div className="absolute inset-0 opacity-5" style={{ backgroundImage: 'radial-gradient(#ffffff 1px, transparent 1px)', backgroundSize: '30px 30px' }}></div>
-
-                <div className="p-6 bg-[#1a1a1d] rounded-full mb-6 shadow-2xl border border-white/5 animate-pulse">
-                    <Activity size={48} className="text-daw-ruby" />
-                </div>
-                <span className="text-sm font-black tracking-[0.3em] opacity-80 uppercase text-white">Ninguna Selección</span>
-                <span className="text-[10px] opacity-40 mt-2 font-mono uppercase tracking-widest">Selecciona una Pista para Editar</span>
-            </div>
-        );
-    }
-
     const selectedClip = useMemo(() => {
-        if (!track) return null;
         if (selectedClipId) {
             const matched = track.clips.find((clip) => clip.id === selectedClipId);
             if (matched) return matched;
@@ -925,6 +923,14 @@ const Editor: React.FC<EditorProps> = ({
             </div>
         </div>
     );
+};
+
+const Editor: React.FC<EditorProps> = (props) => {
+    if (!props.track) {
+        return <EmptyEditor />;
+    }
+
+    return <SelectedTrackEditor {...props} track={props.track} />;
 };
 
 export default React.memo(Editor);
