@@ -707,6 +707,10 @@ const createHubWindow = () => {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
             nodeIntegration: false,
+            // Keep the renderer sandboxed; the preload only depends on
+            // Electron built-ins and its boundary validator is intentionally
+            // inline (sandboxed preloads cannot require app-local modules).
+            sandbox: true,
         },
         autoHideMenuBar: true,
     });
@@ -780,6 +784,7 @@ const createEditorWindow = (request = {}) => {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
             nodeIntegration: false,
+            sandbox: true,
         },
         autoHideMenuBar: true,
     });

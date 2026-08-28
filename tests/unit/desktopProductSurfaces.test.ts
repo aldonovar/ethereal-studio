@@ -70,6 +70,8 @@ describe('desktop product surface integration', () => {
         expect(mainSource).toContain('normalizeDesktopEditorRequest(request)');
         expect(mainSource).toContain("loadRendererSurface(editorWindow, 'editor', rendererRequest)");
         expect(preloadSource).toContain("ipcRenderer.invoke('desktop-open-editor', normalizeDesktopEditorRequest(request))");
+        expect(preloadSource).not.toContain("require('./desktop-product-surface.cjs')");
+        expect(mainSource).toContain('sandbox: true');
     });
 
     it('exposes all three independent products from Studio Hub with accessible actions', () => {

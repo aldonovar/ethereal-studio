@@ -1,5 +1,37 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const { normalizeDesktopEditorRequest } = require('./desktop-product-surface.cjs');
+
+// Sandboxed Electron preloads can require Electron built-ins, but they cannot
+// resolve application-local CommonJS modules. Keep this small boundary
+// validator inline so the bridge is exposed in production as well as in dev;
+// the main process runs the canonical `normalizeDesktopEditorRequest` again
+// before creating a window.
+const DESKTOP_PRODUCT_SET = new Set(['studio', 'score', 'keys']);
+const normalizeOptionalEditorIdentifier = (value, label) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    if (typeof value !== 'string' || value.length > 256 || value.trim() !== value) {
+        throw new TypeError(`${label} no es válido.`);
+    }
+    return value;
+};
+const normalizeDesktopEditorRequest = (request) => {
+    if (request === undefined || request === null) return { product: 'studio' };
+    if (typeof request !== 'object' || Array.isArray(request)) {
+        throw new TypeError('La solicitud del editor no es válida.');
+    }
+
+    const requestedProduct = request.product === undefined || request.product === null || request.product === ''
+        ? 'studio'
+        : request.product;
+    if (typeof requestedProduct !== 'string' || !DESKTOP_PRODUCT_SET.has(requestedProduct)) {
+        throw new TypeError('La superficie solicitada no está autorizada.');
+    }
+
+    return {
+        product: requestedProduct,
+        projectId: normalizeOptionalEditorIdentifier(request.projectId, 'El proyecto'),
+        shareToken: normalizeOptionalEditorIdentifier(request.shareToken, 'El token compartido'),
+    };
+};
 
 const MAX_PROJECT_BUNDLE_BYTES = 1024 * 1024 * 1024;
 const PROJECT_BUNDLE_CHUNK_BYTES = 4 * 1024 * 1024;
