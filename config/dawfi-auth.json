@@ -7,7 +7,7 @@
   "oauthTokenPath": "/auth/v1/oauth/token",
   "oauthConsentPath": "/oauth/consent",
   "authCallbackPath": "/auth/callback",
-  "siteOrigin": "https://hollowbits.com",
+  "siteOrigin": "https://www.hollowbits.com",
   "canonicalAuthOrigin": "https://play.hollowbits.com",
   "desktopBridgeUrl": "https://www.hollowbits.com/desktop-auth",
   "desktopRedirectUri": "dawfi://auth/callback",

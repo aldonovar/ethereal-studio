@@ -245,7 +245,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       return;
     }
     try {
-      const { error } = await supabase.auth.signOut();
+      // Keep the button's promise: it signs out this installation only.
+      // Revoking other devices is an explicit account-security action.
+      const { error } = await supabase.auth.signOut({ scope: 'local' });
       if (error) {
         console.error('[authStore] Sign-out error:', error.message);
       }

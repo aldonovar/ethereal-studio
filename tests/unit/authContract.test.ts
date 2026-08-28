@@ -19,6 +19,7 @@ describe('DAW-fi unified auth contract', () => {
       oauthTokenPath: '/auth/v1/oauth/token',
       oauthConsentPath: '/oauth/consent',
       authCallbackPath: '/auth/callback',
+      siteOrigin: 'https://www.hollowbits.com',
       canonicalAuthOrigin: 'https://play.hollowbits.com',
       desktopBridgeUrl: 'https://www.hollowbits.com/desktop-auth',
       desktopRedirectUri: 'dawfi://auth/callback',

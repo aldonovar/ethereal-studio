@@ -25,6 +25,7 @@ import { formatCountLimit, formatStorageLimit, formatUsageMetric, getTierLimits,
 import { supabase } from '../../services/supabase';
 import { projectOsService, type UsageSummary } from '../../services/projectOsService';
 import { useAuthStore } from '../../stores/authStore';
+import { formatSessionDate, loadActiveSessions, maskSessionIp, normalizeUserAgent, revokeRemoteSession, type ActiveSession } from '../../services/sessionControl';
 
 type FeedbackStatus = 'idle' | 'saving' | 'success' | 'error';
 
@@ -33,7 +34,7 @@ interface DesktopSettingsProps {
 }
 
 export function DesktopSettings({ onBack }: DesktopSettingsProps) {
-  const { user, profile, signOut, refreshProfile } = useAuthStore();
+  const { user, session, profile, signOut, refreshProfile } = useAuthStore();
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
@@ -42,7 +43,9 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
   const [license, setLicense] = useState<any>(null);
-  const [sessions, setSessions] = useState<any[]>([]);
+  const [sessions, setSessions] = useState<ActiveSession[]>([]);
+  const [sessionMessage, setSessionMessage] = useState('');
+  const [sessionBusy, setSessionBusy] = useState<string | null>(null);
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
   const [loadingExtra, setLoadingExtra] = useState(false);
 
@@ -109,8 +112,13 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
     const fetchExtraData = async () => {
       setLoadingExtra(true);
       try {
-        const { data: sessionData } = await supabase.rpc('get_active_sessions');
-        if (sessionData) setSessions(sessionData);
+        try {
+          setSessions(await loadActiveSessions(session));
+          setSessionMessage('');
+        } catch (sessionError) {
+          console.error('[DesktopSettings] Sessions failed:', sessionError);
+          setSessionMessage('No se pudieron consultar las sesiones en este momento.');
+        }
 
         const { data: licenseData } = await supabase
           .from('licenses')
@@ -132,7 +140,15 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
     };
 
     void fetchExtraData();
-  }, [user]);
+  }, [user, session]);
+
+  useEffect(() => {
+    if (!user || !session) return;
+    const interval = window.setInterval(() => {
+      void loadActiveSessions(session).then(setSessions).catch(() => undefined);
+    }, 30_000);
+    return () => window.clearInterval(interval);
+  }, [user, session]);
 
   const handleSaveProfile = async () => {
     if (!user) return;
@@ -259,7 +275,7 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
 
       const { data, error } = await supabase.auth.mfa.enroll({
         factorType: 'totp',
-        friendlyName: 'HollowBits Desktop',
+        friendlyName: 'DAW-fi Desktop',
       });
       if (error || !data) {
         setMfaMessage(error?.message || 'Error al activar 2FA.');
@@ -339,9 +355,39 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
   };
 
   const handleRevokeSession = async (sessionId: string) => {
-    const { data, error } = await supabase.rpc('revoke_device_session', { target_session_id: sessionId });
-    if (!error && data) {
-      setSessions((current) => current.filter((session) => session.id !== sessionId));
+    const target = sessions.find((item) => item.id === sessionId);
+    if (!target || target.is_current) {
+      setSessionMessage('La sesión de este dispositivo se cierra desde “Cerrar sesión”.');
+      return;
+    }
+    if (!window.confirm('¿Revocar el acceso de este dispositivo?')) return;
+    setSessionBusy(sessionId);
+    try {
+      const result = await revokeRemoteSession(sessionId);
+      if (!result.revoked) throw new Error(result.reason || 'La sesión ya no está activa.');
+      setSessions(await loadActiveSessions(session));
+      setSessionMessage('Acceso revocado. El cambio se reflejará cuando ese dispositivo renueve su sesión.');
+    } catch (error) {
+      console.error('[DesktopSettings] Revoke session failed:', error);
+      setSessionMessage('No se pudo revocar el dispositivo. Intenta de nuevo.');
+    } finally {
+      setSessionBusy(null);
+    }
+  };
+
+  const handleSignOutOthers = async () => {
+    if (!window.confirm('Se cerrarán las demás sesiones activas. ¿Continuar?')) return;
+    setSessionBusy('others');
+    try {
+      const { error } = await supabase.auth.signOut({ scope: 'others' });
+      if (error) throw error;
+      setSessions(await loadActiveSessions(session));
+      setSessionMessage('Las demás sesiones fueron cerradas.');
+    } catch (error) {
+      console.error('[DesktopSettings] Sign out others failed:', error);
+      setSessionMessage('No se pudieron cerrar las demás sesiones.');
+    } finally {
+      setSessionBusy(null);
     }
   };
 
@@ -529,25 +575,30 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
 
         <div className="desktop-panel">
           <h3><MonitorSmartphone size={18} /> Dispositivos activos</h3>
-          <p>Revisa y revoca el acceso a sesiones abiertas.</p>
+          <p>Revisa navegador, IP parcialmente oculta y última actividad. La lista se actualiza automáticamente.</p>
+          <button className="desktop-btn" onClick={() => void handleSignOutOthers()} disabled={sessionBusy !== null || sessions.filter((item) => !item.is_current).length === 0} style={{ marginTop: 10 }}>
+            {sessionBusy === 'others' ? <Loader2 size={15} /> : <Shield size={15} />} Cerrar otras sesiones
+          </button>
           <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
             {loadingExtra ? (
               <p><Loader2 size={14} /> Cargando sesiones...</p>
             ) : sessions.length === 0 ? (
               <p>No hay sesiones activas adicionales.</p>
-            ) : sessions.map((session) => (
-              <div key={session.id} className="desktop-row desktop-panel" style={{ padding: 14 }}>
+            ) : sessions.map((activeSession) => {
+              const device = normalizeUserAgent(activeSession.user_agent);
+              return <div key={activeSession.id} className="desktop-row desktop-panel" style={{ padding: 14 }}>
                 <div className="desktop-row" style={{ justifyContent: 'flex-start' }}>
                   <Laptop size={18} color="var(--desktop-purple)" />
                   <div>
-                    <strong>{session.user_agent?.split(' ').slice(0, 3).join(' ') || 'Dispositivo desconocido'}</strong>
-                    <p className="desktop-meta">IP: {String(session.ip || 'Oculta')} · {new Date(session.last_active).toLocaleString('es-MX')}</p>
+                    <strong>{device.label} {activeSession.is_current ? '· Este dispositivo' : ''}</strong>
+                    <p className="desktop-meta">IP: {maskSessionIp(activeSession.ip)} · Alta: {formatSessionDate(activeSession.created_at)} · Última actividad: {formatSessionDate(activeSession.last_active)}</p>
                   </div>
                 </div>
-                <button className="desktop-btn desktop-btn--danger" onClick={() => handleRevokeSession(session.id)} title="Revocar sesion"><Trash2 size={15} /></button>
-              </div>
-            ))}
+                <button className="desktop-btn desktop-btn--danger" onClick={() => void handleRevokeSession(activeSession.id)} disabled={activeSession.is_current || sessionBusy !== null} title={activeSession.is_current ? 'Usa Cerrar sesión para este dispositivo' : 'Revocar sesión'}>{sessionBusy === activeSession.id ? <Loader2 size={15} /> : <Trash2 size={15} />}</button>
+              </div>;
+            })}
           </div>
+          {sessionMessage && <div className="desktop-feedback" style={{ marginTop: 12 }}><AlertCircle size={15} /> {sessionMessage}</div>}
         </div>
       </section>
 
