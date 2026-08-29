@@ -13,6 +13,7 @@ const authStore = read('stores/authStore.ts');
 const supabase = read('services/supabase.ts');
 const authContractModule = read('services/authContract.ts');
 const authContract = JSON.parse(read('config/dawfi-auth.json'));
+const envExample = read('.env.example');
 const launcher = read('scripts/launch-dawfi-desktop.sh');
 const linuxDesktopEntry = read('packaging/linux/daw-fi.desktop');
 const packageJson = JSON.parse(read('package.json'));
@@ -57,6 +58,7 @@ requireSnippet(linuxDesktopEntry, 'Exec=/home/aldonovar/.local/bin/daw-fi %u', '
 requireSnippet(linuxDesktopEntry, 'MimeType=x-scheme-handler/dawfi;x-scheme-handler/hollowbits;', 'The Linux desktop entry does not register DAW-fi callback protocols.');
 
 forbidSnippet(main, 'DAWFI_DESKTOP_OAUTH_CLIENT_ID', 'Desktop still blocks on a manually registered OAuth Server client.');
+forbidSnippet(envExample, 'DAWFI_DESKTOP_OAUTH_CLIENT_ID', 'The sample environment still asks for a separate Desktop OAuth client.');
 forbidSnippet(main, "webContents.send('desktop-auth-callback', url)", 'A raw callback URL is still sent to the renderer.');
 forbidSnippet(authStore, 'hashParams.get(\'access_token\')', 'Renderer still reads an access token from a URL fragment.');
 forbidSnippet(authStore, 'hashParams.get(\'refresh_token\')', 'Renderer still reads a refresh token from a URL fragment.');
