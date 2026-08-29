@@ -9,6 +9,7 @@ import {
   CreditCard,
   Eye,
   EyeOff,
+  Globe,
   KeyRound,
   Laptop,
   Loader2,
@@ -579,22 +580,39 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
           <button className="desktop-btn" onClick={() => void handleSignOutOthers()} disabled={sessionBusy !== null || sessions.filter((item) => !item.is_current).length === 0} style={{ marginTop: 10 }}>
             {sessionBusy === 'others' ? <Loader2 size={15} /> : <Shield size={15} />} Cerrar otras sesiones
           </button>
-          <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
+          <div className="desktop-session-list">
             {loadingExtra ? (
               <p><Loader2 size={14} /> Cargando sesiones...</p>
             ) : sessions.length === 0 ? (
               <p>No hay sesiones activas adicionales.</p>
             ) : sessions.map((activeSession) => {
-              const device = normalizeUserAgent(activeSession.user_agent);
-              return <div key={activeSession.id} className="desktop-row desktop-panel" style={{ padding: 14 }}>
-                <div className="desktop-row" style={{ justifyContent: 'flex-start' }}>
-                  <Laptop size={18} color="var(--desktop-purple)" />
-                  <div>
-                    <strong>{device.label} {activeSession.is_current ? '· Este dispositivo' : ''}</strong>
-                    <p className="desktop-meta">IP: {maskSessionIp(activeSession.ip)} · Alta: {formatSessionDate(activeSession.created_at)} · Última actividad: {formatSessionDate(activeSession.last_active)}</p>
+              const device = normalizeUserAgent(activeSession.user_agent, activeSession.tag);
+              return <div key={activeSession.id} className="desktop-session-item desktop-panel">
+                <div className="desktop-session-main">
+                  <div className="desktop-session-icon">
+                    {device.kind === 'desktop' ? <Laptop size={18} /> : <Globe size={18} />}
+                  </div>
+                  <div className="desktop-session-copy">
+                    <div className="desktop-session-heading">
+                      <strong>{device.label}</strong>
+                      {activeSession.is_current && <span className="desktop-session-current">Este dispositivo</span>}
+                    </div>
+                    <dl className="desktop-session-meta">
+                      <div><dt>IP</dt><dd>{maskSessionIp(activeSession.ip)}</dd></div>
+                      <div><dt>Alta</dt><dd>{formatSessionDate(activeSession.created_at)}</dd></div>
+                      <div><dt>Última actividad</dt><dd>{formatSessionDate(activeSession.last_active)}</dd></div>
+                    </dl>
                   </div>
                 </div>
-                <button className="desktop-btn desktop-btn--danger" onClick={() => void handleRevokeSession(activeSession.id)} disabled={activeSession.is_current || sessionBusy !== null} title={activeSession.is_current ? 'Usa Cerrar sesión para este dispositivo' : 'Revocar sesión'}>{sessionBusy === activeSession.id ? <Loader2 size={15} /> : <Trash2 size={15} />}</button>
+                <button
+                  className="desktop-btn desktop-btn--danger desktop-session-revoke"
+                  onClick={() => void handleRevokeSession(activeSession.id)}
+                  disabled={activeSession.is_current || sessionBusy !== null}
+                  title={activeSession.is_current ? 'Usa Cerrar sesión para este dispositivo' : `Revocar ${device.label}`}
+                  aria-label={activeSession.is_current ? 'Sesión actual; se cierra desde Cerrar sesión' : `Revocar sesión de ${device.label}`}
+                >
+                  {sessionBusy === activeSession.id ? <Loader2 size={15} /> : <Trash2 size={15} />}
+                </button>
               </div>;
             })}
           </div>
