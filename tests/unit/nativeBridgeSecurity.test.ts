@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { createRequire } from 'node:module';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 const require = createRequire(import.meta.url);
@@ -15,13 +17,17 @@ const {
 
 describe('native bridge sender policy', () => {
   it('accepts only the exact packaged renderer file or the configured dev origin', () => {
-    const rendererFilePath = '/opt/dawfi/dist/index.html';
+    const rendererFilePath = path.resolve('dawfi-fixture', 'dist', 'index.html');
+    const rendererUrl = pathToFileURL(rendererFilePath);
+    rendererUrl.searchParams.set('surface', 'editor');
+    const otherRendererUrl = pathToFileURL(path.join(path.dirname(rendererFilePath), 'other.html'));
+
     expect(isTrustedRendererUrl(
-      'file:///opt/dawfi/dist/index.html?surface=editor',
+      rendererUrl.href,
       { rendererFilePath, isDev: false },
     )).toBe(true);
     expect(isTrustedRendererUrl(
-      'file:///opt/dawfi/dist/other.html',
+      otherRendererUrl.href,
       { rendererFilePath, isDev: false },
     )).toBe(false);
     expect(isTrustedRendererUrl(
