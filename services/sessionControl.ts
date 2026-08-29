@@ -1,5 +1,6 @@
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './supabase';
+export { formatSessionDate, maskSessionIp, normalizeUserAgent } from './sessionPresentation';
 
 export interface ActiveSession {
   id: string;
@@ -28,32 +29,6 @@ function readJwtSessionId(accessToken: string | null | undefined): string | null
   } catch {
     return null;
   }
-}
-
-export function normalizeUserAgent(userAgent: string | null | undefined): { label: string; kind: 'desktop' | 'mobile' | 'browser' } {
-  const value = String(userAgent || '').toLowerCase();
-  const browser = value.includes('edg/') ? 'Edge' : value.includes('firefox/') ? 'Firefox' : value.includes('chrome/') ? 'Chrome' : value.includes('safari/') ? 'Safari' : 'Navegador';
-  if (/android|iphone|ipad|mobile/.test(value)) return { label: `${browser} · móvil`, kind: 'mobile' };
-  if (/electron/.test(value)) return { label: 'DAW-fi Desktop', kind: 'desktop' };
-  if (/windows|macintosh|linux|x11/.test(value)) return { label: `${browser} · escritorio`, kind: 'desktop' };
-  return { label: browser, kind: 'browser' };
-}
-
-export function maskSessionIp(ip: string | null | undefined): string {
-  if (!ip) return 'No disponible';
-  const value = String(ip);
-  if (value.includes(':')) {
-    const parts = value.split(':').filter(Boolean);
-    return `${parts.slice(0, 2).join(':')}:••••`;
-  }
-  const parts = value.split('.');
-  return parts.length === 4 ? `${parts.slice(0, 2).join('.')}.•••.•••` : '••••';
-}
-
-export function formatSessionDate(value: string | null | undefined): string {
-  if (!value) return 'No disponible';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'No disponible' : date.toLocaleString('es-PE', { dateStyle: 'medium', timeStyle: 'short' });
 }
 
 export async function loadActiveSessions(session: Session | null): Promise<ActiveSession[]> {

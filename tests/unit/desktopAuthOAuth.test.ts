@@ -110,6 +110,8 @@ describe('DAW-fi Desktop OAuth handoff', () => {
       expect(body).toEqual({ auth_code: 'opaque-code-123', code_verifier: request.codeVerifier });
       expect(headers.apikey).toBe(ANON_KEY);
       expect(headers.Authorization).toBe(`Bearer ${ANON_KEY}`);
+      expect(headers['User-Agent']).toBe('DAW-fi Desktop');
+      expect(headers['X-Client-Info']).toBe('daw-fi-desktop');
       expect(String(init.body)).not.toContain('client_secret');
       return new Response(JSON.stringify({
         access_token: 'a'.repeat(64),

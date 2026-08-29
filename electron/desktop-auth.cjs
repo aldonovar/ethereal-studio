@@ -340,6 +340,8 @@ const exchangeAuthorizationCode = async ({
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                'User-Agent': 'DAW-fi Desktop',
+                'X-Client-Info': 'daw-fi-desktop',
                 apikey: publicKey,
                 Authorization: `Bearer ${publicKey}`,
             },
