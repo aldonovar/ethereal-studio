@@ -1,15 +1,57 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
 const {
     BENCHMARK_MODE,
     parseLiveCaptureConfig,
     resolveBenchmarkArtifactPath,
     sanitizeBenchmarkStatus
 } = require('./benchmarkBridge.cjs');
+const {
+    DAWFI_AUTH_CONTRACT,
+    DesktopAuthError,
+    createAuthorizationRequest,
+    exchangeAuthorizationCode,
+    parseAuthorizationCallback,
+    parseTokenResponse,
+    toPublicAuthError,
+    validatePublishableKey,
+    validatePendingRequest
+} = require('./desktop-auth.cjs');
+const { createAuthCallbackCoordinator } = require('./desktop-auth-callback-coordinator.cjs');
+const {
+    SUPPORTED_AUDIO_IMPORT_EXTENSIONS,
+    resolveFfmpegBinary,
+    runFfmpeg: runFfmpegProcess
+} = require('./ffmpeg-runtime.cjs');
+const {
+    MAX_AUDIO_IMPORT_FILE_BYTES,
+    assertAudioImportSelectionCount
+} = require('./audio-import-policy.cjs');
+const { createRendererVisibilityGuard } = require('./renderer-visibility-guard.cjs');
+const {
+    NativeBridgeSecurityError,
+    attachTrustedNavigation,
+    isTrustedRendererUrl,
+    requireTrustedIpcSender
+} = require('./native-bridge-security.cjs');
+const {
+    NativeFileGrantError,
+    NativeFileGrantManager
+} = require('./native-file-grants.cjs');
+const {
+    MAX_PROJECT_BUNDLE_BYTES,
+    ProjectBundleIoError,
+    ProjectBundleIoManager,
+    assertSha256,
+    sanitizeProjectBundleFileName
+} = require('./project-bundle-io.cjs');
+const {
+    getDesktopProductTitle,
+    normalizeDesktopEditorRequest
+} = require('./desktop-product-surface.cjs');
 
 const AUDIO_FORMATS = new Set(['wav', 'aiff', 'flac', 'mp3']);
 const AUDIO_MIME_BY_FORMAT = {
@@ -19,17 +61,16 @@ const AUDIO_MIME_BY_FORMAT = {
     mp3: 'audio/mpeg'
 };
 
-let ffmpegBinaryPath = null;
+let ffmpegStaticPath = null;
 try {
-    const resolved = require('ffmpeg-static');
-    if (resolved) {
-        ffmpegBinaryPath = resolved.includes('app.asar')
-            ? resolved.replace('app.asar', 'app.asar.unpacked')
-            : resolved;
-    }
+    ffmpegStaticPath = require('ffmpeg-static');
 } catch (error) {
-    ffmpegBinaryPath = null;
     console.warn('FFmpeg static binary is not available.', error);
+}
+
+const ffmpegBinaryPath = resolveFfmpegBinary({ staticPath: ffmpegStaticPath });
+if (!ffmpegBinaryPath) {
+    console.warn('No usable FFmpeg binary was found. Advanced import fallback is disabled.');
 }
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -64,46 +105,29 @@ const getCodecArgs = (format, bitDepth) => {
     return ['-c:a', 'libmp3lame', '-b:a', '320k', '-joint_stereo', '1'];
 };
 
-const runFfmpeg = (args) => new Promise((resolve, reject) => {
-    if (!ffmpegBinaryPath) {
-        reject(new Error('FFmpeg no esta disponible en esta build.'));
-        return;
-    }
-
-    const child = spawn(ffmpegBinaryPath, args, {
-        windowsHide: true
-    });
-
-    let stderr = '';
-
-    child.stderr.on('data', (chunk) => {
-        stderr += chunk.toString();
-    });
-
-    child.on('error', (error) => {
-        reject(error);
-    });
-
-    child.on('close', (code) => {
-        if (code === 0) {
-            resolve();
-            return;
-        }
-
-        reject(new Error(stderr || `FFmpeg finalizo con codigo ${code}.`));
-    });
-});
+const runFfmpeg = (args) => runFfmpegProcess(ffmpegBinaryPath, args);
 
 const DIRECTORY_SCAN_LIMIT = 10000;
-const MAX_DIRECT_FILE_READ_BYTES = 512 * 1024 * 1024;
-const MAX_IMPORT_FILE_BYTES = 256 * 1024 * 1024;
-const MAX_IMPORT_BATCH_BYTES = 1024 * 1024 * 1024;
+const MAX_DIRECT_FILE_READ_BYTES = MAX_AUDIO_IMPORT_FILE_BYTES;
+const MAX_IMPORT_FILE_BYTES = MAX_AUDIO_IMPORT_FILE_BYTES;
+const projectBundleIo = new ProjectBundleIoManager();
+const nativeFileGrants = new NativeFileGrantManager({
+    audioExtensions: SUPPORTED_AUDIO_IMPORT_EXTENSIONS,
+    scanExtensions: [...SUPPORTED_AUDIO_IMPORT_EXTENSIONS, 'vst3', 'dll'],
+    maxAudioBytes: MAX_DIRECT_FILE_READ_BYTES,
+    scanLimit: DIRECTORY_SCAN_LIMIT
+});
+const rendererRoles = new Map();
+const rendererEntryPath = path.resolve(__dirname, '../dist/index.html');
 
 let mainWindow = null;
 let hubWindow = null;
 let editorWindow = null;
+let editorProduct = null;
 let pendingAuthCallbackUrl = null;
-let pendingAuthState = null;
+let pendingAuthCallbackResult = null;
+let pendingDesktopAuthRequest = null;
+let volatileDesktopAuthSession = null;
 const liveBenchmarkConfig = parseLiveCaptureConfig(process.argv, process.env);
 const liveBenchmarkRuntime = {
     enabled: Boolean(liveBenchmarkConfig),
@@ -119,6 +143,32 @@ const logMainError = (label, error) => {
     console.error(`[main:${label}] ${message}`);
 };
 
+const isTrustedRuntimeUrl = (url) => isTrustedRendererUrl(url, {
+    isDev: isDevRuntime(),
+    devOrigin: 'http://localhost:3000',
+    rendererFilePath: rendererEntryPath
+});
+
+const requireNativeSender = (event, allowedRoles) => {
+    return requireTrustedIpcSender(event, {
+        roles: rendererRoles,
+        allowedRoles,
+        isTrustedUrl: isTrustedRuntimeUrl
+    });
+};
+
+const runProjectBundleOperation = async (label, operation) => {
+    try {
+        return await operation();
+    } catch (error) {
+        logMainError(label, error);
+        if (error instanceof ProjectBundleIoError || error instanceof NativeBridgeSecurityError) {
+            throw new Error(error.message);
+        }
+        throw new Error('No se pudo completar la operación segura del proyecto .esp.');
+    }
+};
+
 process.on('uncaughtException', (error) => {
     logMainError('uncaughtException', error);
 });
@@ -126,68 +176,6 @@ process.on('uncaughtException', (error) => {
 process.on('unhandledRejection', (reason) => {
     logMainError('unhandledRejection', reason);
 });
-
-const sanitizeExtensions = (extensions) => {
-    if (!Array.isArray(extensions)) return new Set();
-
-    return new Set(
-        extensions
-            .filter((entry) => typeof entry === 'string')
-            .map((entry) => entry.trim().toLowerCase().replace(/^\./, ''))
-            .filter((entry) => entry.length > 0)
-    );
-};
-
-const scanDirectoryRecursive = async (rootDirectory, allowedExtensions) => {
-    const queue = [rootDirectory];
-    const collected = [];
-
-    while (queue.length > 0 && collected.length < DIRECTORY_SCAN_LIMIT) {
-        const current = queue.pop();
-        if (!current) continue;
-
-        let entries = [];
-        try {
-            entries = await fs.readdir(current, { withFileTypes: true });
-        } catch {
-            continue;
-        }
-
-        for (const entry of entries) {
-            if (collected.length >= DIRECTORY_SCAN_LIMIT) break;
-
-            const fullPath = path.join(current, entry.name);
-
-            if (entry.isDirectory()) {
-                queue.push(fullPath);
-                continue;
-            }
-
-            if (!entry.isFile()) continue;
-
-            const extension = path.extname(entry.name).toLowerCase().replace(/^\./, '');
-            if (allowedExtensions.size > 0 && !allowedExtensions.has(extension)) {
-                continue;
-            }
-
-            let size = 0;
-            try {
-                const fileStats = await fs.stat(fullPath);
-                size = fileStats.size;
-            } catch {
-                size = 0;
-            }
-
-            collected.push({
-                name: entry.name,
-                path: fullPath,
-                size
-            });
-        }
-    }
-
-    return collected;
-};
 
 const serializeWindowState = (win) => {
     if (!win) {
@@ -332,6 +320,7 @@ ipcMain.handle('benchmark-publish-status', async (_event, payload) => {
 
 // Save Project
 ipcMain.handle('save-project', async (event, data, defaultName) => {
+    requireNativeSender(event, ['editor']);
     const win = BrowserWindow.fromWebContents(event.sender);
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
         title: 'Guardar Proyecto Hollow Bits',
@@ -349,6 +338,7 @@ ipcMain.handle('save-project', async (event, data, defaultName) => {
 
 // Open Project
 ipcMain.handle('open-project', async (event) => {
+    requireNativeSender(event, ['editor']);
     const win = BrowserWindow.fromWebContents(event.sender);
     const { filePaths } = await dialog.showOpenDialog(win, {
         title: 'Abrir Proyecto',
@@ -364,44 +354,127 @@ ipcMain.handle('open-project', async (event) => {
     return null;
 });
 
+ipcMain.handle('project-bundle-write-start', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-write-start', async () => {
+        requireNativeSender(event, ['editor']);
+        const totalBytes = payload?.totalBytes;
+        if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0 || totalBytes > MAX_PROJECT_BUNDLE_BYTES) {
+            throw new ProjectBundleIoError('INVALID_PAYLOAD', 'El tamaño declarado del proyecto no es válido.');
+        }
+        const sha256 = assertSha256(payload?.sha256);
+        const defaultName = sanitizeProjectBundleFileName(payload?.defaultName);
+        const win = BrowserWindow.fromWebContents(event.sender);
+        const { canceled, filePath } = await dialog.showSaveDialog(win, {
+            title: 'Guardar Proyecto DAW-fi',
+            defaultPath: defaultName,
+            filters: [{ name: 'DAW-fi Portable Project', extensions: ['esp'] }]
+        });
+        if (canceled || !filePath) return { canceled: true };
+
+        const targetPath = path.extname(filePath).toLowerCase() === '.esp'
+            ? filePath
+            : `${filePath}.esp`;
+        const session = await projectBundleIo.beginWrite({
+            senderId: event.sender.id,
+            targetPath,
+            totalBytes,
+            sha256
+        });
+        return { canceled: false, ...session };
+    })
+));
+
+ipcMain.handle('project-bundle-write-chunk', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-write-chunk', async () => {
+        requireNativeSender(event, ['editor']);
+        return await projectBundleIo.appendWriteChunk({
+            senderId: event.sender.id,
+            sessionId: payload?.sessionId,
+            offset: payload?.offset,
+            data: payload?.data,
+            sha256: payload?.sha256
+        });
+    })
+));
+
+ipcMain.handle('project-bundle-write-complete', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-write-complete', async () => {
+        requireNativeSender(event, ['editor']);
+        return await projectBundleIo.completeWrite({
+            senderId: event.sender.id,
+            sessionId: payload?.sessionId
+        });
+    })
+));
+
+ipcMain.handle('project-bundle-write-cancel', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-write-cancel', async () => {
+        requireNativeSender(event, ['editor']);
+        return { success: await projectBundleIo.cancelWrite({
+            senderId: event.sender.id,
+            sessionId: payload?.sessionId
+        }) };
+    })
+));
+
+ipcMain.handle('project-bundle-read-start', async (event) => (
+    runProjectBundleOperation('project-bundle-read-start', async () => {
+        requireNativeSender(event, ['editor']);
+        const win = BrowserWindow.fromWebContents(event.sender);
+        const result = await dialog.showOpenDialog(win, {
+            title: 'Abrir Proyecto DAW-fi',
+            properties: ['openFile'],
+            filters: [{ name: 'DAW-fi Portable Project', extensions: ['esp'] }]
+        });
+        if (result.canceled || result.filePaths.length === 0) return null;
+        return await projectBundleIo.beginRead({
+            senderId: event.sender.id,
+            filePath: result.filePaths[0]
+        });
+    })
+));
+
+ipcMain.handle('project-bundle-read-chunk', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-read-chunk', async () => {
+        requireNativeSender(event, ['editor']);
+        return await projectBundleIo.readChunk({
+            senderId: event.sender.id,
+            sessionId: payload?.sessionId,
+            offset: payload?.offset,
+            length: payload?.length
+        });
+    })
+));
+
+ipcMain.handle('project-bundle-read-close', async (event, payload) => (
+    runProjectBundleOperation('project-bundle-read-close', async () => {
+        requireNativeSender(event, ['editor']);
+        return { success: await projectBundleIo.closeRead({
+            senderId: event.sender.id,
+            sessionId: payload?.sessionId
+        }) };
+    })
+));
+
 // Select Audio Files
 ipcMain.handle('select-files', async (event) => {
+    requireNativeSender(event, ['editor']);
     const win = BrowserWindow.fromWebContents(event.sender);
-    const { filePaths } = await dialog.showOpenDialog(win, {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
         title: 'Importar Audio',
         properties: ['openFile', 'multiSelections'],
         filters: [
-            { name: 'Audio Files', extensions: ['wav', 'mp3', 'aif', 'aiff', 'flac', 'ogg'] }
+            { name: 'Audio Files', extensions: [...SUPPORTED_AUDIO_IMPORT_EXTENSIONS] }
         ]
     });
 
-    if (filePaths && filePaths.length > 0) {
+    if (!canceled && filePaths && filePaths.length > 0) {
+        assertAudioImportSelectionCount(filePaths.length);
+
         const files = [];
-        let accumulatedSize = 0;
 
         for (const filePath of filePaths) {
-            const stats = await fs.stat(filePath);
-            if (!stats.isFile()) {
-                continue;
-            }
-
-            if (stats.size > MAX_IMPORT_FILE_BYTES) {
-                throw new Error(`El archivo ${path.basename(filePath)} supera el limite de 256 MB.`);
-            }
-
-            accumulatedSize += stats.size;
-            if (accumulatedSize > MAX_IMPORT_BATCH_BYTES) {
-                throw new Error('La importacion supera el limite de 1 GB por lote. Importa menos archivos por tanda.');
-            }
-
-            const buffer = await fs.readFile(filePath);
-            const data = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-
-            files.push({
-                name: path.basename(filePath),
-                path: filePath,
-                data
-            });
+            files.push(await nativeFileGrants.grantSelectedAudioFile(event.sender.id, filePath));
         }
 
         return files;
@@ -409,32 +482,19 @@ ipcMain.handle('select-files', async (event) => {
     return [];
 });
 
-ipcMain.handle('read-file-from-path', async (_event, rawFilePath) => {
-    const filePath = typeof rawFilePath === 'string' ? rawFilePath.trim() : '';
-    if (!filePath) return null;
-
+ipcMain.handle('read-file-from-path', async (event, rawFilePath) => {
+    requireNativeSender(event, ['editor']);
     try {
-        const stats = await fs.stat(filePath);
-        if (!stats.isFile()) return null;
-        if (stats.size > MAX_DIRECT_FILE_READ_BYTES) {
-            throw new Error('El archivo excede el tamano permitido para carga directa.');
-        }
-
-        const buffer = await fs.readFile(filePath);
-        const data = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-
-        return {
-            name: path.basename(filePath),
-            path: filePath,
-            data
-        };
+        return await nativeFileGrants.readGrantedAudioFile(event.sender.id, rawFilePath);
     } catch (error) {
-        console.error('read-file-from-path failed', error);
+        const code = error instanceof NativeFileGrantError ? error.code : 'READ_FAILED';
+        console.error(`read-file-from-path failed (${code})`);
         return null;
     }
 });
 
 ipcMain.handle('select-directory', async (event) => {
+    requireNativeSender(event, ['editor']);
     const win = BrowserWindow.fromWebContents(event.sender);
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
         title: 'Seleccionar carpeta',
@@ -445,26 +505,29 @@ ipcMain.handle('select-directory', async (event) => {
         return null;
     }
 
-    return filePaths[0];
+    return await nativeFileGrants.grantDirectory(event.sender.id, filePaths[0]);
 });
 
-ipcMain.handle('scan-directory-files', async (_event, payload) => {
+ipcMain.handle('scan-directory-files', async (event, payload) => {
+    requireNativeSender(event, ['editor']);
     const directory = typeof payload?.directory === 'string' ? payload.directory : '';
     if (!directory) return [];
 
     try {
-        const stats = await fs.stat(directory);
-        if (!stats.isDirectory()) return [];
-    } catch {
+        return await nativeFileGrants.scanGrantedDirectory(
+            event.sender.id,
+            directory,
+            payload?.extensions
+        );
+    } catch (error) {
+        const code = error instanceof NativeFileGrantError ? error.code : 'SCAN_FAILED';
+        console.error(`scan-directory-files failed (${code})`);
         return [];
     }
-
-    const extensions = sanitizeExtensions(payload?.extensions);
-    const files = await scanDirectoryRecursive(directory, extensions);
-    return files;
 });
 
-ipcMain.handle('transcode-audio', async (_event, payload) => {
+ipcMain.handle('transcode-audio', async (event, payload) => {
+    requireNativeSender(event, ['editor']);
     const format = String(payload?.outputFormat || '').toLowerCase();
     if (!AUDIO_FORMATS.has(format)) {
         return { success: false, error: 'Formato de salida invalido.' };
@@ -477,6 +540,9 @@ ipcMain.handle('transcode-audio', async (_event, payload) => {
     const inputBuffer = toNodeBuffer(payload?.inputData);
     if (!inputBuffer || inputBuffer.length === 0) {
         return { success: false, error: 'No se recibieron datos de audio validos.' };
+    }
+    if (inputBuffer.length > MAX_IMPORT_FILE_BYTES) {
+        return { success: false, error: 'El audio supera el limite de 512 MB para transcodificacion.' };
     }
 
     const requestedBitDepth = clamp(Number(payload?.bitDepth || 16), 16, 32);
@@ -493,6 +559,7 @@ ipcMain.handle('transcode-audio', async (_event, payload) => {
 
         const codecArgs = getCodecArgs(format, bitDepth);
         const ffmpegArgs = [
+            '-nostdin',
             '-hide_banner',
             '-loglevel', 'error',
             '-y',
@@ -558,7 +625,43 @@ const loadRendererSurface = (win, surface, params = {}) => {
 };
 
 const attachWindowLifecycle = (win, role) => {
+    const senderId = win.webContents.id;
+    rendererRoles.set(senderId, role);
+    attachTrustedNavigation(win, isTrustedRuntimeUrl);
+    win.webContents.once('destroyed', () => {
+        rendererRoles.delete(senderId);
+        nativeFileGrants.clearSender(senderId);
+        void projectBundleIo.closeForSender(senderId);
+    });
     const notifyState = () => broadcastWindowState(win);
+    const rendererVisibilityGuard = createRendererVisibilityGuard({
+        win,
+        role,
+        logger: ({ role: safeRole, cause, stage, action }) => {
+            console.error(
+                `[main:${safeRole}-renderer-visibility] cause=${cause} stage=${stage} action=${action}`
+            );
+        },
+        showNativeFallback: async ({ retry, close }) => {
+            if (!win || win.isDestroyed()) return;
+            const result = await dialog.showMessageBox(win, {
+                type: 'error',
+                title: 'DAW-fi',
+                message: 'La interfaz de DAW-fi no pudo mostrarse.',
+                detail: 'La recuperación automática terminó sin contenido visible. Puedes reintentar la carga o cerrar esta ventana.',
+                buttons: ['Reintentar carga', 'Cerrar DAW-fi'],
+                defaultId: 0,
+                cancelId: 1,
+                noLink: true
+            });
+            if (!win || win.isDestroyed()) return;
+            if (result.response === 0) {
+                retry();
+            } else {
+                close();
+            }
+        }
+    });
     win.on('maximize', notifyState);
     win.on('unmaximize', notifyState);
     win.on('minimize', notifyState);
@@ -568,6 +671,7 @@ const attachWindowLifecycle = (win, role) => {
     win.webContents.on('did-finish-load', notifyState);
     win.on('unresponsive', () => {
         logMainError(`${role}-window-unresponsive`, 'Renderer no responde.');
+        void rendererVisibilityGuard.handleUnresponsive();
     });
     win.webContents.on('render-process-gone', (_event, details) => {
         logMainError(`${role}-render-process-gone`, `${details.reason} (exitCode=${details.exitCode})`);
@@ -587,6 +691,7 @@ const createHubWindow = () => {
     }
 
     hubWindow = new BrowserWindow({
+        title: 'DAW-fi',
         width: 1320,
         height: 860,
         minWidth: 1040,
@@ -602,6 +707,10 @@ const createHubWindow = () => {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
             nodeIntegration: false,
+            // Keep the renderer sandboxed; the preload only depends on
+            // Electron built-ins and its boundary validator is intentionally
+            // inline (sandboxed preloads cannot require app-local modules).
+            sandbox: true,
         },
         autoHideMenuBar: true,
     });
@@ -627,11 +736,11 @@ const createHubWindow = () => {
 };
 
 const normalizeEditorRequest = (request) => {
-    if (!request || typeof request !== 'object') return {};
+    const normalized = normalizeDesktopEditorRequest(request);
     return {
-        project: typeof request.projectId === 'string' ? request.projectId : undefined,
-        token: typeof request.shareToken === 'string' ? request.shareToken : undefined,
-        localPath: typeof request.localPath === 'string' ? request.localPath : undefined,
+        product: normalized.product,
+        project: normalized.projectId,
+        token: normalized.shareToken,
     };
 };
 
@@ -645,13 +754,21 @@ const showHubWindow = () => {
 };
 
 const createEditorWindow = (request = {}) => {
+    const rendererRequest = normalizeEditorRequest(request);
+    const requestedProduct = rendererRequest.product;
     if (editorWindow && !editorWindow.isDestroyed()) {
+        if (editorProduct !== requestedProduct) {
+            editorProduct = requestedProduct;
+            editorWindow.setTitle(getDesktopProductTitle(requestedProduct));
+            loadRendererSurface(editorWindow, 'editor', rendererRequest);
+        }
         editorWindow.focus();
         return editorWindow;
     }
 
     const windowIcon = getWindowIcon();
     editorWindow = new BrowserWindow({
+        title: getDesktopProductTitle(requestedProduct),
         width: 1400,
         height: 900,
         minWidth: 1120,
@@ -667,9 +784,11 @@ const createEditorWindow = (request = {}) => {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
             nodeIntegration: false,
+            sandbox: true,
         },
         autoHideMenuBar: true,
     });
+    editorProduct = requestedProduct;
     mainWindow = editorWindow;
 
     attachWindowLifecycle(editorWindow, 'editor');
@@ -696,6 +815,7 @@ const createEditorWindow = (request = {}) => {
 
     editorWindow.on('closed', () => {
         editorWindow = null;
+        editorProduct = null;
         mainWindow = hubWindow;
         if (!liveBenchmarkRuntime.enabled && hubWindow && !hubWindow.isDestroyed()) {
             showHubWindow();
@@ -706,7 +826,7 @@ const createEditorWindow = (request = {}) => {
         hubWindow.hide();
     }
 
-    loadRendererSurface(editorWindow, 'editor', normalizeEditorRequest(request));
+    loadRendererSurface(editorWindow, 'editor', rendererRequest);
 
     editorWindow.once('ready-to-show', () => {
         if (!editorWindow || editorWindow.isDestroyed()) return;
@@ -724,65 +844,245 @@ const createEditorWindow = (request = {}) => {
     return editorWindow;
 };
 
-const AUTH_PROTOCOL = 'hollowbits';
-const DESKTOP_AUTH_BRIDGE_URL = 'https://hollowbits.com/desktop-auth';
+const AUTH_PROTOCOL = new URL(DAWFI_AUTH_CONTRACT.desktopRedirectUri).protocol.slice(0, -1);
+const LEGACY_AUTH_PROTOCOL = new URL(DAWFI_AUTH_CONTRACT.legacyDesktopRedirectUri).protocol.slice(0, -1);
+const DESKTOP_AUTH_REDIRECT_URI = DAWFI_AUTH_CONTRACT.desktopRedirectUri;
+const DESKTOP_AUTH_SUPABASE_URL = process.env.DAWFI_SUPABASE_URL
+    || process.env.VITE_SUPABASE_URL
+    || DAWFI_AUTH_CONTRACT.supabaseUrl;
+const DESKTOP_AUTH_PUBLISHABLE_KEY = process.env.DAWFI_SUPABASE_PUBLISHABLE_KEY || '';
+const AUTH_PENDING_FILE = 'desktop-auth-pending.bin';
+const AUTH_SESSION_FILE = 'desktop-auth-session.bin';
+const AUTH_REQUEST_TIMEOUT_MS = 15_000;
+const consumedAuthStates = new Map();
+const authCallbackCoordinator = createAuthCallbackCoordinator();
 
-const findAuthCallbackUrl = (argv) => {
-    if (!Array.isArray(argv)) return null;
-    return argv.find((entry) => typeof entry === 'string' && entry.startsWith(`${AUTH_PROTOCOL}://`)) || null;
+const isSecureStorageAvailable = () => {
+    if (!safeStorage.isEncryptionAvailable()) return false;
+    if (typeof safeStorage.getSelectedStorageBackend === 'function') {
+        return safeStorage.getSelectedStorageBackend() !== 'basic_text';
+    }
+    return true;
 };
 
-const getAuthCallbackState = (url) => {
+const getAuthRecordPath = (filename) => path.join(app.getPath('userData'), filename);
+
+const writeEncryptedAuthRecord = async (filename, payload) => {
+    if (!isSecureStorageAvailable()) return false;
+    const encrypted = safeStorage.encryptString(JSON.stringify(payload));
+    const filePath = getAuthRecordPath(filename);
+    await fs.writeFile(filePath, encrypted, { mode: 0o600 });
+    await fs.chmod(filePath, 0o600).catch(() => undefined);
+    return true;
+};
+
+const readEncryptedAuthRecord = async (filename) => {
+    if (!isSecureStorageAvailable()) return null;
     try {
-        const parsed = new URL(url);
-        const hashParams = new URLSearchParams(parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash);
-        return hashParams.get('desktop_state') || parsed.searchParams.get('desktop_state') || parsed.searchParams.get('state') || null;
-    } catch {
+        const encrypted = await fs.readFile(getAuthRecordPath(filename));
+        return JSON.parse(safeStorage.decryptString(encrypted));
+    } catch (error) {
+        if (error?.code !== 'ENOENT') {
+            await fs.unlink(getAuthRecordPath(filename)).catch(() => undefined);
+        }
         return null;
     }
 };
 
-const createDesktopAuthBridgeUrl = (request) => {
-    const state = crypto.randomBytes(18).toString('base64url');
-    pendingAuthState = state;
+const removeAuthRecord = async (filename) => {
+    await fs.unlink(getAuthRecordPath(filename)).catch((error) => {
+        if (error?.code !== 'ENOENT') throw error;
+    });
+};
 
-    const returnTo = new URL(`${AUTH_PROTOCOL}://auth/callback`);
-    returnTo.searchParams.set('desktop_state', state);
+const persistPendingAuthRequest = async (request) => {
+    pendingDesktopAuthRequest = request;
+    await writeEncryptedAuthRecord(AUTH_PENDING_FILE, { version: 1, request });
+};
 
-    const bridgeUrl = new URL(DESKTOP_AUTH_BRIDGE_URL);
-    bridgeUrl.searchParams.set('source', 'desktop');
-    bridgeUrl.searchParams.set('mode', request?.mode === 'signup' ? 'signup' : 'login');
-    bridgeUrl.searchParams.set('state', state);
-    bridgeUrl.searchParams.set('return_to', returnTo.toString());
-    if (request?.prompt === 'none' || request?.prompt === 'select_account') {
-        bridgeUrl.searchParams.set('prompt', request.prompt);
+const readPendingAuthRequest = async () => {
+    if (pendingDesktopAuthRequest) return pendingDesktopAuthRequest;
+    const record = await readEncryptedAuthRecord(AUTH_PENDING_FILE);
+    const request = record?.version === 1 ? record.request : null;
+    if (!request) return null;
+    try {
+        validatePendingRequest(request);
+        pendingDesktopAuthRequest = request;
+        return request;
+    } catch {
+        await removeAuthRecord(AUTH_PENDING_FILE);
+        return null;
+    }
+};
+
+const clearPendingAuthRequest = async () => {
+    pendingDesktopAuthRequest = null;
+    await removeAuthRecord(AUTH_PENDING_FILE);
+};
+
+const normalizeDesktopSession = (session) => parseTokenResponse({
+    access_token: session?.access_token,
+    refresh_token: session?.refresh_token,
+    expires_in: session?.expires_in || 3600,
+    token_type: session?.token_type || 'bearer'
+});
+
+const persistDesktopAuthSession = async (session) => {
+    const normalized = normalizeDesktopSession(session);
+    volatileDesktopAuthSession = normalized;
+    const encrypted = await writeEncryptedAuthRecord(AUTH_SESSION_FILE, {
+        version: 1,
+        session: normalized
+    });
+    return { session: normalized, persistence: encrypted ? 'encrypted' : 'memory' };
+};
+
+const readDesktopAuthSession = async () => {
+    if (volatileDesktopAuthSession) return volatileDesktopAuthSession;
+    const record = await readEncryptedAuthRecord(AUTH_SESSION_FILE);
+    if (record?.version !== 1 || !record.session) return null;
+    try {
+        volatileDesktopAuthSession = normalizeDesktopSession(record.session);
+        return volatileDesktopAuthSession;
+    } catch {
+        await removeAuthRecord(AUTH_SESSION_FILE);
+        return null;
+    }
+};
+
+const clearDesktopAuthSession = async () => {
+    volatileDesktopAuthSession = null;
+    await removeAuthRecord(AUTH_SESSION_FILE);
+};
+
+const findAuthCallbackUrl = (argv) => {
+    if (!Array.isArray(argv)) return null;
+    return argv.find((entry) => (
+        typeof entry === 'string'
+        && (entry.startsWith(`${AUTH_PROTOCOL}://`) || entry.startsWith(`${LEGACY_AUTH_PROTOCOL}://`))
+    )) || null;
+};
+
+const digestAuthState = (state) => crypto.createHash('sha256').update(state, 'utf8').digest('hex');
+
+const pruneConsumedAuthStates = () => {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [digest, consumedAt] of consumedAuthStates.entries()) {
+        if (consumedAt < cutoff) consumedAuthStates.delete(digest);
+    }
+};
+
+const readCallbackState = (rawUrl) => {
+    try {
+        const parsed = new URL(rawUrl);
+        return parsed.searchParams.get('state') || '';
+    } catch {
+        return '';
+    }
+};
+
+const sendDesktopAuthResult = (payload) => {
+    pendingAuthCallbackResult = payload;
+    const target = hubWindow && !hubWindow.isDestroyed() ? hubWindow : createHubWindow();
+    if (!target || target.isDestroyed()) return;
+    if (!target.isVisible()) target.show();
+    target.focus();
+    target.webContents.send('desktop-auth-callback', payload);
+};
+
+const processAuthCallbackOnce = async (rawUrl) => {
+    pruneConsumedAuthStates();
+    const pending = await readPendingAuthRequest();
+    if (!pending) {
+        const callbackState = readCallbackState(rawUrl);
+        const replayed = callbackState && consumedAuthStates.has(digestAuthState(callbackState));
+        sendDesktopAuthResult({
+            success: false,
+            errorCode: replayed ? 'AUTH_DESKTOP_HANDOFF_REPLAYED' : 'AUTH_CALLBACK_INVALID',
+            error: replayed
+                ? 'Este código de acceso ya fue utilizado.'
+                : 'No existe una solicitud de acceso pendiente.'
+        });
+        return;
     }
 
-    return { url: bridgeUrl.toString(), state };
+    try {
+        validatePendingRequest(pending);
+        const parsed = parseAuthorizationCallback(rawUrl, {
+            expectedState: pending.state,
+            redirectUri: pending.redirectUri
+        });
+
+        if (parsed.kind === 'error') {
+            consumedAuthStates.set(digestAuthState(pending.state), Date.now());
+            await clearPendingAuthRequest();
+            sendDesktopAuthResult({
+                success: false,
+                requestId: pending.requestId,
+                errorCode: parsed.code,
+                error: parsed.message
+            });
+            return;
+        }
+
+        consumedAuthStates.set(digestAuthState(pending.state), Date.now());
+        await clearPendingAuthRequest();
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
+        let session;
+        try {
+            session = await exchangeAuthorizationCode({
+                pending,
+                code: parsed.code,
+                publishableKey: DESKTOP_AUTH_PUBLISHABLE_KEY,
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timeout);
+        }
+
+        const persisted = await persistDesktopAuthSession(session);
+        sendDesktopAuthResult({
+            success: true,
+            requestId: pending.requestId,
+            session: persisted.session,
+            persistence: persisted.persistence
+        });
+    } catch (error) {
+        const publicError = toPublicAuthError(error);
+        if (publicError.code === 'AUTH_DESKTOP_HANDOFF_EXPIRED') {
+            await clearPendingAuthRequest();
+        }
+        sendDesktopAuthResult({
+            success: false,
+            requestId: pending.requestId,
+            errorCode: publicError.code,
+            error: publicError.message
+        });
+    }
+};
+
+const processAuthCallback = (rawUrl) => {
+    const callbackState = readCallbackState(rawUrl);
+    const stateDigest = callbackState ? digestAuthState(callbackState) : '';
+    return authCallbackCoordinator.run(
+        stateDigest,
+        () => processAuthCallbackOnce(rawUrl)
+    );
 };
 
 const deliverAuthCallback = (url) => {
     if (!url) return;
-    const callbackState = getAuthCallbackState(url);
-    if (pendingAuthState && callbackState && callbackState !== pendingAuthState) {
-        console.warn('[auth] Ignoring desktop auth callback with mismatched state.');
+    if (!app.isReady()) {
+        pendingAuthCallbackUrl = url;
         return;
     }
-    if (callbackState && callbackState === pendingAuthState) {
-        pendingAuthState = null;
-    }
-
-    pendingAuthCallbackUrl = url;
-    if (!app.isReady()) return;
-    const target = hubWindow && !hubWindow.isDestroyed() ? hubWindow : createHubWindow();
-    if (target && !target.isDestroyed()) {
-        if (!target.isVisible()) target.show();
-        target.focus();
-        target.webContents.send('desktop-auth-callback', url);
-    }
+    void processAuthCallback(url);
 };
 
-ipcMain.handle('desktop-open-editor', async (_event, request) => {
+ipcMain.handle('desktop-open-editor', async (event, request) => {
+    requireNativeSender(event, ['hub']);
     try {
         createEditorWindow(request);
         return { success: true };
@@ -793,7 +1093,8 @@ ipcMain.handle('desktop-open-editor', async (_event, request) => {
     }
 });
 
-ipcMain.handle('desktop-show-hub', async () => {
+ipcMain.handle('desktop-show-hub', async (event) => {
+    requireNativeSender(event, ['editor']);
     try {
         if (editorWindow && !editorWindow.isDestroyed()) {
             editorWindow.close();
@@ -810,14 +1111,38 @@ ipcMain.handle('desktop-show-hub', async () => {
 
 ipcMain.handle('desktop-open-auth', async (_event, request) => {
     try {
-        const authRequest = createDesktopAuthBridgeUrl(request || {});
+        validatePublishableKey(DESKTOP_AUTH_PUBLISHABLE_KEY);
+        const authRequest = createAuthorizationRequest({
+            supabaseUrl: DESKTOP_AUTH_SUPABASE_URL,
+            redirectUri: DESKTOP_AUTH_REDIRECT_URI
+        });
+        const pending = {
+            ...authRequest,
+            url: undefined,
+            requestId: crypto.randomUUID(),
+            mode: request?.mode === 'signup' ? 'signup' : 'login'
+        };
+        await persistPendingAuthRequest(pending);
         await shell.openExternal(authRequest.url);
-        return { success: true, ...authRequest };
+        return {
+            success: true,
+            requestId: pending.requestId,
+            persistence: isSecureStorageAvailable() ? 'encrypted' : 'memory'
+        };
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logMainError('desktop-open-auth', message);
-        return { success: false, error: message };
+        await clearPendingAuthRequest().catch(() => undefined);
+        const publicError = toPublicAuthError(error);
+        return {
+            success: false,
+            errorCode: publicError.code,
+            error: publicError.message
+        };
     }
+});
+
+ipcMain.handle('desktop-cancel-auth', async () => {
+    await clearPendingAuthRequest();
+    return { success: true };
 });
 
 ipcMain.handle('desktop-open-external-url', async (_event, rawUrl) => {
@@ -836,9 +1161,29 @@ ipcMain.handle('desktop-open-external-url', async (_event, rawUrl) => {
 });
 
 ipcMain.handle('desktop-get-pending-auth-callback', async () => {
-    const url = pendingAuthCallbackUrl;
-    pendingAuthCallbackUrl = null;
-    return url;
+    const result = pendingAuthCallbackResult;
+    pendingAuthCallbackResult = null;
+    return result;
+});
+
+ipcMain.handle('desktop-get-auth-session', async () => readDesktopAuthSession());
+
+ipcMain.handle('desktop-persist-auth-session', async (_event, session) => {
+    try {
+        const persisted = await persistDesktopAuthSession(session);
+        return { success: true, persistence: persisted.persistence };
+    } catch {
+        return {
+            success: false,
+            errorCode: 'AUTH_CALLBACK_INVALID',
+            error: 'La sesión recibida no es válida.'
+        };
+    }
+});
+
+ipcMain.handle('desktop-clear-auth-session', async () => {
+    await clearDesktopAuthSession();
+    return { success: true };
 });
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -863,8 +1208,10 @@ app.on('open-url', (event, url) => {
 app.whenReady().then(() => {
     if (process.defaultApp) {
         app.setAsDefaultProtocolClient(AUTH_PROTOCOL, process.execPath, [path.resolve(process.argv[1] || '')]);
+        app.setAsDefaultProtocolClient(LEGACY_AUTH_PROTOCOL, process.execPath, [path.resolve(process.argv[1] || '')]);
     } else {
         app.setAsDefaultProtocolClient(AUTH_PROTOCOL);
+        app.setAsDefaultProtocolClient(LEGACY_AUTH_PROTOCOL);
     }
 
     const initialAuthCallback = findAuthCallbackUrl(process.argv);
@@ -878,6 +1225,12 @@ app.whenReady().then(() => {
         createHubWindow();
     }
 
+    if (pendingAuthCallbackUrl) {
+        const callbackUrl = pendingAuthCallbackUrl;
+        pendingAuthCallbackUrl = null;
+        void processAuthCallback(callbackUrl);
+    }
+
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
             createHubWindow();
@@ -887,6 +1240,10 @@ app.whenReady().then(() => {
 
 app.on('child-process-gone', (_event, details) => {
     logMainError('child-process-gone', `${details.type} (${details.reason}, exitCode=${details.exitCode})`);
+});
+
+app.on('will-quit', () => {
+    void projectBundleIo.closeAll();
 });
 
 app.on('window-all-closed', () => {

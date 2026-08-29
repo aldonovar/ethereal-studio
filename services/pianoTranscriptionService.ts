@@ -16,25 +16,6 @@ export interface PianoTranscriptionResult {
     scanResult: NoteScanResult;
 }
 
-interface WorkerProgressMessage {
-    type: 'progress';
-    payload: NoteScanProgress;
-}
-
-interface WorkerResultMessage {
-    type: 'result';
-    payload: NoteScanResult;
-}
-
-interface WorkerErrorMessage {
-    type: 'error';
-    payload: {
-        message: string;
-    };
-}
-
-type WorkerOutgoingMessage = WorkerProgressMessage | WorkerResultMessage | WorkerErrorMessage;
-
 interface EnvelopeFrame {
     timeSec: number;
     rms: number;
@@ -443,7 +424,7 @@ const refinePitchAndVelocityFromSpectrum = (
     });
 };
 
-const refinePianoStemNotes = (
+const refinePianoHqNotes = (
     notes: DetectedMidiNote[],
     averageConfidence: number,
     buffer: AudioBuffer,
@@ -503,106 +484,6 @@ const buildPianoDefaults = (settings: Partial<NoteScanSettings>): Partial<NoteSc
     };
 };
 
-const runPianoStemWorker = async (
-    buffer: AudioBuffer,
-    bpm: number,
-    settings: NoteScanSettings,
-    onProgress?: (progress: NoteScanProgress) => void,
-    signal?: AbortSignal
-): Promise<NoteScanResult | null> => {
-    if (typeof Worker === 'undefined') return null;
-
-    return await new Promise<NoteScanResult | null>((resolve, reject) => {
-        const worker = new Worker(new URL('../workers/note-transcriber.worker.ts', import.meta.url), {
-            type: 'module'
-        });
-
-        let settled = false;
-
-        const cleanup = () => {
-            signal?.removeEventListener('abort', handleAbort);
-            worker.onmessage = null;
-            worker.onerror = null;
-            worker.terminate();
-        };
-
-        const finishResolve = (value: NoteScanResult | null) => {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            resolve(value);
-        };
-
-        const finishReject = (error: unknown) => {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            reject(error instanceof Error ? error : new Error(String(error)));
-        };
-
-        const handleAbort = () => {
-            finishReject(new Error('Escaneo cancelado por el usuario.'));
-        };
-
-        signal?.addEventListener('abort', handleAbort, { once: true });
-
-        worker.onmessage = (event: MessageEvent<WorkerOutgoingMessage>) => {
-            const message = event.data;
-            if (!message) return;
-
-            if (message.type === 'progress') {
-                onProgress?.(message.payload);
-                return;
-            }
-
-            if (message.type === 'error') {
-                finishReject(new Error(message.payload.message || 'Fallo en el analisis fisico de piano.'));
-                return;
-            }
-
-            if (message.type === 'result') {
-                finishResolve({
-                    ...message.payload,
-                    backendUsed: 'physical-piano-stem'
-                });
-            }
-        };
-
-        worker.onerror = (event: ErrorEvent) => {
-            finishReject(new Error(event.message || 'Fallo en el worker de piano stem.'));
-        };
-
-        const channels: Float32Array[] = [];
-        const transferables: Transferable[] = [];
-        for (let ch = 0; ch < buffer.numberOfChannels; ch += 1) {
-            const copied = new Float32Array(buffer.getChannelData(ch));
-            channels.push(copied);
-            transferables.push(copied.buffer);
-        }
-
-        worker.postMessage({
-            type: 'scan',
-            payload: {
-                channels,
-                sampleRate: buffer.sampleRate,
-                bpm,
-                settings
-            }
-        }, transferables);
-    });
-};
-
-const shouldAcceptWorkerResult = (scanResult: NoteScanResult | null, buffer: AudioBuffer): scanResult is NoteScanResult => {
-    if (!scanResult) return false;
-    if (scanResult.notes.length === 0) return false;
-
-    const notesPerSecond = scanResult.notes.length / Math.max(1, buffer.duration);
-    return (
-        scanResult.averageConfidence >= 0.48
-        && notesPerSecond >= 0.6
-    );
-};
-
 export const pianoTranscriptionService = {
     async transcribeAudioBuffer(
         buffer: AudioBuffer,
@@ -616,10 +497,10 @@ export const pianoTranscriptionService = {
         onProgress?.({
             stage: 'preparing',
             progress: 0.04,
-            message: 'Analisis especializado para stem de piano...'
+            message: 'Inicializando transcripcion HQ de piano...'
         });
 
-        let baseScanResult = await runPianoStemWorker(
+        const baseScanResult = await noteScannerService.scanAudioBuffer(
             buffer,
             bpm,
             normalizedSettings,
@@ -627,29 +508,13 @@ export const pianoTranscriptionService = {
             signal
         );
 
-        if (!shouldAcceptWorkerResult(baseScanResult, buffer)) {
-            onProgress?.({
-                stage: 'analyzing',
-                progress: 0.42,
-                message: 'Refinando con motor extendido para mejorar precision del stem...'
-            });
-
-            baseScanResult = await noteScannerService.scanAudioBuffer(
-                buffer,
-                bpm,
-                normalizedSettings,
-                onProgress,
-                signal
-            );
-        }
-
         onProgress?.({
             stage: 'postprocess',
             progress: 0.9,
-            message: 'Midiendo onsets, energia, frecuencias e intensidad del stem...'
+            message: 'Midiendo onsets, energía, frecuencias e intensidad del análisis HQ...'
         });
 
-        const refinedDetectedNotes = refinePianoStemNotes(
+        const refinedDetectedNotes = refinePianoHqNotes(
             baseScanResult.notes,
             baseScanResult.averageConfidence,
             buffer,
@@ -670,7 +535,7 @@ export const pianoTranscriptionService = {
         onProgress?.({
             stage: 'done',
             progress: 1,
-            message: `Stem de piano refinado (${notes.length} notas) · precision ${(averageConfidence * 100).toFixed(0)}%`
+            message: `Análisis HQ de piano (${notes.length} notas) · confianza del detector ${(averageConfidence * 100).toFixed(0)}%`
         });
 
         return {

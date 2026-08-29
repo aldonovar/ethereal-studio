@@ -400,7 +400,7 @@ const Transport: React.FC<TransportProps> = React.memo(({
     }, [transportVisualActive]);
 
     const handleGlobalReset = () => { setBpm(124); setMasterTranspose(0); };
-    const buttonClass = "w-9 h-7 flex items-center justify-center rounded-[2px] border border-transparent transition-all";
+    const buttonClass = "daw-transport-action w-9 h-7 flex items-center justify-center rounded-[2px] border border-transparent transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-cyan/70 motion-reduce:transition-none";
     const inactiveClass = "bg-[#2d2d2d] text-gray-400 hover:bg-[#3d3d3d] hover:text-gray-200";
     const engineIsPlaying = audioEngine.getIsPlaying();
     const hasResumeOffset = audioEngine.getCurrentTime() > 0.0001;
@@ -409,7 +409,9 @@ const Transport: React.FC<TransportProps> = React.memo(({
         currentBeat: transport.currentBeat,
         currentSixteenth: transport.currentSixteenth
     };
-    const isPaused = !transport.isPlaying && !engineIsPlaying && hasResumeOffset;
+    const isPlaybackActive = transport.isPlaying;
+    const isPaused = !transport.isPlaying && !transport.isRecording && !engineIsPlaying && hasResumeOffset;
+    const isStopped = !transport.isPlaying && !transport.isRecording && !engineIsPlaying && !hasResumeOffset;
     const isLoopEnabled = transport.loopMode !== 'off';
     const loopBadge = transport.loopMode === 'once' ? '1' : transport.loopMode === 'infinite' ? '∞' : '';
     const loopTitle = transport.loopMode === 'off'
@@ -652,11 +654,15 @@ const Transport: React.FC<TransportProps> = React.memo(({
                 </div>
 
                 {/* CONTROLS GROUP 2: Transport Buttons */}
-                <div className="flex items-center gap-1 bg-[#1a1a1a] p-1 rounded-sm border border-[#2d2d2d]">
+                <div className="daw-transport-controls flex items-center gap-1 bg-[#1a1a1a] p-1 rounded-sm border border-[#2d2d2d]" role="group" aria-label="Controles de transporte">
                     <button
+                        type="button"
                         onClick={onLoopToggle}
                         className={`${buttonClass} ${isLoopEnabled ? 'bg-daw-violet text-white shadow-[0_0_10px_rgba(168,85,247,0.5)] relative' : `${inactiveClass} relative`}`}
                         title={loopTitle}
+                        aria-label={loopTitle}
+                        aria-pressed={isLoopEnabled}
+                        data-transport-action="loop"
                     >
                         <Repeat size={12} />
                         {loopBadge && (
@@ -667,41 +673,76 @@ const Transport: React.FC<TransportProps> = React.memo(({
                     </button>
                     <div className="w-px h-4 bg-[#333] mx-1"></div>
 
-                    <button onClick={onSkipStart} className={`${buttonClass} ${inactiveClass}`} title="Ir al Inicio"><SkipBack size={12} fill="currentColor" /></button>
-                    <button onClick={onStop} className={`${buttonClass} ${inactiveClass}`} title="Detener"><Square size={10} fill="currentColor" /></button>
+                    <button
+                        type="button"
+                        onClick={onSkipStart}
+                        className={`${buttonClass} ${inactiveClass}`}
+                        title="Volver al inicio"
+                        aria-label="Volver al inicio"
+                        data-transport-action="rewind"
+                    >
+                        <SkipBack size={12} fill="currentColor" />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={onStop}
+                        className={`${buttonClass} ${isStopped ? 'bg-gray-200 text-[#171717] shadow-[0_0_8px_rgba(229,231,235,0.28)]' : inactiveClass}`}
+                        title="Detener y volver al inicio"
+                        aria-label="Detener y volver al inicio"
+                        aria-pressed={isStopped}
+                        data-transport-action="stop"
+                    >
+                        <Square size={10} fill="currentColor" />
+                    </button>
 
                     <button
+                        type="button"
                         onClick={onPlay}
-                        className={`${buttonClass} ${transport.isPlaying && !transport.isRecording ? 'bg-green-600 text-white shadow-[0_0_10px_rgba(22,163,74,0.5)]' : 'bg-[#2d2d2d] text-green-500 hover:text-green-400'}`}
+                        className={`${buttonClass} ${isPlaybackActive ? 'bg-green-600 text-white shadow-[0_0_10px_rgba(22,163,74,0.5)]' : 'bg-[#2d2d2d] text-green-500 hover:text-green-400'}`}
                         title="Reproducir"
+                        aria-label="Reproducir"
+                        aria-pressed={isPlaybackActive}
+                        data-transport-action="play"
                     >
                         <Play size={12} fill="currentColor" />
                     </button>
 
                     <button
+                        type="button"
                         onClick={onPause}
                         className={`${buttonClass} ${isPaused ? 'bg-yellow-600 text-white shadow-[0_0_10px_rgba(202,138,4,0.5)]' : inactiveClass}`}
                         title="Pausar"
+                        aria-label="Pausar"
+                        aria-pressed={isPaused}
+                        data-transport-action="pause"
                     >
                         <Pause size={12} fill="currentColor" />
                     </button>
 
-                    <button onClick={onSkipEnd} className={`${buttonClass} ${inactiveClass}`} title="Ir al Final"><SkipForward size={12} fill="currentColor" /></button>
+                    <button type="button" onClick={onSkipEnd} className={`${buttonClass} ${inactiveClass}`} title="Ir al final" aria-label="Ir al final" data-transport-action="skip-end"><SkipForward size={12} fill="currentColor" /></button>
 
                     <div className="w-px h-4 bg-[#333] mx-1"></div>
                     <button
+                        type="button"
                         onClick={onRecordToggle}
                         className={`${buttonClass} ${transport.isRecording ? 'bg-daw-ruby text-white animate-pulse shadow-[0_0_10px_rgba(244,63,94,0.5)]' : 'bg-[#2d2d2d] text-daw-ruby hover:text-red-400'}`}
                         title="Grabar"
+                        aria-label="Grabar"
+                        aria-pressed={transport.isRecording}
+                        data-transport-action="record"
                     >
                         <Circle size={10} fill="currentColor" />
                     </button>
 
                     <div className="relative ml-1" ref={punchPanelRef}>
                         <button
+                            type="button"
                             onClick={() => setShowPunchPanel((prev) => !prev)}
                             className={`${buttonClass} ${punchRange.enabled ? 'bg-daw-violet text-white shadow-[0_0_10px_rgba(168,85,247,0.5)]' : inactiveClass}`}
                             title="Panel Punch In/Out"
+                            aria-label="Abrir panel Punch In/Out"
+                            aria-expanded={showPunchPanel}
+                            data-transport-action="punch"
                         >
                             P
                         </button>

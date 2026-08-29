@@ -1,5 +1,5 @@
 {
-  "name": "HOLLOW BITS",
+  "name": "DAW-fi",
   "description": "Una Estación de Trabajo de Audio Digital (DAW) web de grado profesional y minimalista. Cuenta con gestión de pistas, rack de dispositivos y conectividad MIDI.",
   "requestFramePermissions": [
     "microphone"

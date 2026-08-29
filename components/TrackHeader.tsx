@@ -182,10 +182,13 @@ const TrackHeader: React.FC<TrackHeaderProps> = React.memo(({ track, height, isS
                         </span>
                     </div>
                     <button
+                        type="button"
                         onClick={(e) => { e.stopPropagation(); onDelete(); }}
-                        className="text-gray-600 hover:text-daw-ruby opacity-0 group-hover:opacity-100 transition-opacity p-0.5 shrink-0"
+                        aria-label={`Eliminar pista ${track.name}`}
+                        title={`Eliminar pista ${track.name}`}
+                        className="min-h-6 min-w-6 inline-flex items-center justify-center text-gray-400 hover:text-daw-ruby opacity-0 group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-daw-ruby/60 transition-opacity shrink-0"
                     >
-                        <Trash2 size={11} />
+                        <Trash2 size={16} />
                     </button>
                 </div>
 

@@ -1,20 +1,13 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { AlertCircle, ArrowLeft, ArrowRight, AtSign, Lock, Mail, User } from 'lucide-react';
 import AppLogo from '../AppLogo';
 import { platformService } from '../../services/platformService';
 import { supabase } from '../../services/supabase';
+import { buildDesktopEmailConfirmationRedirectUrl } from '../../services/authContract';
 import { useAuthStore } from '../../stores/authStore';
 
 type AuthStatus = 'idle' | 'loading' | 'success' | 'error';
-
-function getDesktopEmailRedirectUrl(): string {
-  const url = new URL('https://hollowbits.com/desktop-auth');
-  url.searchParams.set('source', 'desktop');
-  url.searchParams.set('mode', 'signup');
-  url.searchParams.set('return_to', 'hollowbits://auth/callback');
-  return url.toString();
-}
 
 interface DesktopAuthProps {
   type: 'login' | 'signup';
@@ -30,6 +23,27 @@ export function DesktopAuth({ type, onSuccess, onBack, onSwitchType }: DesktopAu
   const [username, setUsername] = useState('');
   const [status, setStatus] = useState<AuthStatus>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const desktopAuthPending = useAuthStore((state) => state.desktopAuthPending);
+  const desktopAuthError = useAuthStore((state) => state.desktopAuthError);
+  const setDesktopAuthPending = useAuthStore((state) => state.setDesktopAuthPending);
+  const clearDesktopAuthError = useAuthStore((state) => state.clearDesktopAuthError);
+
+  useEffect(() => {
+    if (!desktopAuthError) return;
+    setStatus('error');
+    setErrorMessage(desktopAuthError.message);
+  }, [desktopAuthError]);
+
+  useEffect(() => {
+    if (!desktopAuthPending) return;
+    const timeout = window.setTimeout(() => {
+      void platformService.cancelDesktopAuth();
+      setDesktopAuthPending(false);
+      setStatus('error');
+      setErrorMessage('La autorización tardó demasiado. Inténtala nuevamente.');
+    }, 2 * 60 * 1000);
+    return () => window.clearTimeout(timeout);
+  }, [desktopAuthPending, setDesktopAuthPending]);
 
   const finishSession = async (session: Session) => {
     useAuthStore.setState({
@@ -67,7 +81,7 @@ export function DesktopAuth({ type, onSuccess, onBack, onSwitchType }: DesktopAu
               full_name: fullName.trim(),
               username: username.trim(),
             },
-            emailRedirectTo: getDesktopEmailRedirectUrl(),
+            emailRedirectTo: buildDesktopEmailConfirmationRedirectUrl(),
           },
         });
 
@@ -113,6 +127,8 @@ export function DesktopAuth({ type, onSuccess, onBack, onSwitchType }: DesktopAu
   const handleGoogleLogin = async () => {
     setStatus('loading');
     setErrorMessage(null);
+    clearDesktopAuthError();
+    setDesktopAuthPending(true);
 
     try {
       const result = await platformService.openDesktopAuth({
@@ -121,14 +137,32 @@ export function DesktopAuth({ type, onSuccess, onBack, onSwitchType }: DesktopAu
       });
 
       if (!result.success) {
+        setDesktopAuthPending(false);
         setStatus('error');
         setErrorMessage(result.error || 'No se pudo abrir el puente de autenticacion.');
         return;
       }
     } catch (error: any) {
+      setDesktopAuthPending(false);
       setStatus('error');
       setErrorMessage(error?.message || 'Error inesperado al abrir Google.');
     }
+  };
+
+  const handleCancelGoogle = async () => {
+    await platformService.cancelDesktopAuth();
+    setDesktopAuthPending(false);
+    clearDesktopAuthError();
+    setStatus('idle');
+    setErrorMessage(null);
+  };
+
+  const handleBack = async () => {
+    if (desktopAuthPending) {
+      await platformService.cancelDesktopAuth();
+      setDesktopAuthPending(false);
+    }
+    onBack();
   };
 
   if (status === 'success' && type === 'signup') {
@@ -160,8 +194,17 @@ export function DesktopAuth({ type, onSuccess, onBack, onSwitchType }: DesktopAu
       </div>
 
       <button className="desktop-btn desktop-btn--primary" onClick={handleGoogleLogin} disabled={status === 'loading'}>
-        Continuar con Google
+        {desktopAuthPending ? 'Esperando a Google…' : 'Continuar con Google'}
       </button>
+
+      {desktopAuthPending && (
+        <div className="desktop-feedback">
+          Continúa en el navegador. DAW-fi solo aceptará un código temporal ligado a esta solicitud.
+          <button type="button" className="desktop-btn" onClick={() => void handleCancelGoogle()}>
+            Cancelar acceso
+          </button>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} style={{ display: 'grid', gap: 14 }}>
         {status === 'error' && errorMessage && (
@@ -203,7 +246,7 @@ export function DesktopAuth({ type, onSuccess, onBack, onSwitchType }: DesktopAu
         {type === 'login' ? 'Crear cuenta' : 'Ya tengo cuenta'}
       </button>
 
-      <button className="desktop-btn" onClick={onBack}>
+      <button className="desktop-btn" onClick={() => void handleBack()}>
         <ArrowLeft size={15} /> Volver al hub
       </button>
     </div>

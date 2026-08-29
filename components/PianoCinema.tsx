@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Note } from '../types';
 import { buildScoreNoteKey, normalizeMidiVelocity } from '../services/pianoScoreConversionService';
+import { midiNoteLabel } from '../services/synthesiaLayoutService';
 
 interface PianoCinemaProps {
     notes: Note[];
@@ -28,6 +29,7 @@ interface PianoLaneNote extends Note {
 type DragMode = 'move' | 'trim-duration';
 
 interface DragState {
+    pointerId: number;
     noteIndex: number;
     mode: DragMode;
     originPointerY: number;
@@ -40,6 +42,7 @@ const PIANO_MIN_MIDI = 21;
 const PIANO_MAX_MIDI = 108;
 const WHITE_KEY_SET = new Set([0, 2, 4, 5, 7, 9, 11]);
 const BLACK_KEY_SET = new Set([1, 3, 6, 8, 10]);
+const MAX_RIBBON_MARKERS = 48;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
@@ -118,7 +121,7 @@ const PianoCinema: React.FC<PianoCinemaProps> = ({
     livePitches,
     sustainActive,
     zoom = 1,
-    emptyTitle = 'Sin material en Piano Cinema',
+    emptyTitle = 'Sin material en Keys-fi',
     emptyMessage = 'Cuando haya notas, el editor inferior seguira el transporte en tiempo real.',
     onSelectNoteKey,
     onSeekToTimeline16th,
@@ -144,6 +147,7 @@ const PianoCinema: React.FC<PianoCinemaProps> = ({
     }, [livePitches, notes]);
 
     const keyboard = useMemo(() => buildKeyboardLayout(pitchRange.min, pitchRange.max), [pitchRange.max, pitchRange.min]);
+    const idPrefix = useId().replace(/:/g, '');
     const svgRef = useRef<SVGSVGElement>(null);
     const motionLayerRef = useRef<SVGGElement>(null);
     const ribbonPlayheadRef = useRef<SVGLineElement>(null);
@@ -165,6 +169,13 @@ const PianoCinema: React.FC<PianoCinemaProps> = ({
 
     const activeIndexSet = useMemo(() => new Set(activeNoteIndexes), [activeNoteIndexes]);
     const livePitchSet = useMemo(() => new Set(livePitches), [livePitches]);
+    const activePitchSet = useMemo(() => {
+        const pitches = new Set(livePitches);
+        laneNotes.forEach((note) => {
+            if (activeIndexSet.has(note.index)) pitches.add(note.pitch);
+        });
+        return pitches;
+    }, [activeIndexSet, laneNotes, livePitches]);
     const pixelsPer16th = 16 * zoom;
     const lookAhead16ths = 56;
     const lookBehind16ths = 8;
@@ -173,6 +184,17 @@ const PianoCinema: React.FC<PianoCinemaProps> = ({
     const keyboardHeight = 72;
     const noteViewportHeight = mainHeight - keyboardHeight;
     const keyboardTop = noteViewportHeight + 18;
+    const totalBars = Math.max(1, Math.ceil(total16ths / 16));
+    const ribbonMarkerStep = Math.max(1, Math.ceil(totalBars / MAX_RIBBON_MARKERS));
+    const ribbonMarkers = useMemo(() => {
+        const markers: number[] = [];
+        for (let bar = 0; bar < totalBars; bar += ribbonMarkerStep) markers.push(bar);
+        return markers;
+    }, [ribbonMarkerStep, totalBars]);
+    const musicalBar = Math.max(1, Math.floor(playhead16th / 16) + 1);
+    const musicalBeat = Math.max(1, Math.floor((playhead16th % 16) / 4) + 1);
+    const stageTitleId = `${idPrefix}-piano-cinema-title`;
+    const stageDescriptionId = `${idPrefix}-piano-cinema-description`;
 
     useEffect(() => {
         const msPer16th = Math.max(1, 60000 / Math.max(1, bpm) / 4);
@@ -206,7 +228,8 @@ const PianoCinema: React.FC<PianoCinemaProps> = ({
         if (!dragState) return;
 
         const handlePointerMove = (event: PointerEvent) => {
-            if (!svgRef.current || !dragState) return;
+            if (!svgRef.current || !dragState || event.pointerId !== dragState.pointerId) return;
+            event.preventDefault();
             const rect = svgRef.current.getBoundingClientRect();
             const viewScaleY = mainHeight / rect.height;
             const viewScaleX = keyboard.width / rect.width;
@@ -235,15 +258,21 @@ const PianoCinema: React.FC<PianoCinemaProps> = ({
             });
         };
 
-        const handlePointerUp = () => {
+        const handlePointerEnd = (event: PointerEvent) => {
+            if (event.pointerId !== dragState.pointerId) return;
+            if (svgRef.current?.hasPointerCapture?.(event.pointerId)) {
+                svgRef.current.releasePointerCapture(event.pointerId);
+            }
             setDragState(null);
         };
 
         window.addEventListener('pointermove', handlePointerMove);
-        window.addEventListener('pointerup', handlePointerUp);
+        window.addEventListener('pointerup', handlePointerEnd);
+        window.addEventListener('pointercancel', handlePointerEnd);
         return () => {
             window.removeEventListener('pointermove', handlePointerMove);
-            window.removeEventListener('pointerup', handlePointerUp);
+            window.removeEventListener('pointerup', handlePointerEnd);
+            window.removeEventListener('pointercancel', handlePointerEnd);
         };
     }, [dragState, keyboard.keyFrames, keyboard.width, keyboardTop, mainHeight, notes, onUpdateNote, pixelsPer16th, total16ths]);
 
@@ -253,84 +282,198 @@ const PianoCinema: React.FC<PianoCinemaProps> = ({
         onSeekToTimeline16th?.(ratio * Math.max(16, total16ths));
     };
 
+    const handleSeekRibbonKeyDown = (event: React.KeyboardEvent<SVGSVGElement>) => {
+        let nextPlayhead: number | null = null;
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') nextPlayhead = playhead16th - 1;
+        if (event.key === 'ArrowRight' || event.key === 'ArrowUp') nextPlayhead = playhead16th + 1;
+        if (event.key === 'PageDown') nextPlayhead = playhead16th - 16;
+        if (event.key === 'PageUp') nextPlayhead = playhead16th + 16;
+        if (event.key === 'Home') nextPlayhead = 0;
+        if (event.key === 'End') nextPlayhead = Math.max(16, total16ths);
+        if (nextPlayhead === null) return;
+        event.preventDefault();
+        onSeekToTimeline16th?.(clamp(nextPlayhead, 0, Math.max(16, total16ths)));
+    };
+
     return (
-        <div className="flex h-full w-full flex-col overflow-hidden rounded-sm border border-daw-border bg-[#12141b]">
-            <div className="flex h-9 items-center justify-between border-b border-daw-border bg-[#18181b] px-3">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Piano Cinema</span>
-                <div className="flex items-center gap-2">
-                    <span className={`rounded-sm border px-2 py-1 text-[9px] font-bold uppercase tracking-wider ${sustainActive ? 'border-cyan-400/35 bg-cyan-500/10 text-cyan-200' : 'border-white/10 bg-[#151824] text-gray-500'}`}>
+        <div
+            data-piano-cinema="workstation"
+            className="flex h-full w-full flex-col overflow-hidden rounded-sm border border-[#2b2e33] bg-[#111214]"
+        >
+            <div className="flex h-10 shrink-0 items-center justify-between border-b border-[#303238] bg-[#1b1d21] px-3">
+                <div className="flex min-w-0 items-center gap-3">
+                    <span className="h-4 w-1 rounded-[1px] bg-cyan-300/75" aria-hidden="true" />
+                    <div className="min-w-0">
+                        <div className="truncate text-[10px] font-bold uppercase tracking-[0.18em] text-[#d5d8dd]">Keys-fi</div>
+                        <div className="mt-0.5 truncate text-[8px] font-medium uppercase tracking-[0.14em] text-[#777c84]">Visualizador de interpretación</div>
+                    </div>
+                </div>
+
+                <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto text-[8px] font-semibold uppercase tracking-[0.12em] [scrollbar-width:none]">
+                    <span className="hidden rounded-sm border border-[#33363c] bg-[#15171a] px-2 py-1 text-[#9499a1] sm:inline-flex">
+                        {bpm.toFixed(0)} BPM
+                    </span>
+                    <span className="rounded-sm border border-[#33363c] bg-[#15171a] px-2 py-1 text-[#9499a1]">
+                        {laneNotes.length} notas
+                    </span>
+                    <span className={`rounded-sm border px-2 py-1 ${sustainActive ? 'border-cyan-300/35 bg-cyan-300/[0.08] text-cyan-100/85' : 'border-[#33363c] bg-[#15171a] text-[#686d74]'}`}>
                         Sustain {sustainActive ? 'On' : 'Off'}
                     </span>
                     {livePitches.length > 0 && (
-                        <span className="rounded-sm border border-emerald-400/35 bg-emerald-500/10 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-emerald-200">
+                        <span className="inline-flex items-center gap-1.5 rounded-sm border border-cyan-300/35 bg-cyan-300/[0.08] px-2 py-1 text-cyan-100/85">
+                            <span className="h-1.5 w-1.5 rounded-full bg-cyan-300" aria-hidden="true" />
                             Live {livePitches.length}
                         </span>
                     )}
                 </div>
             </div>
 
-            <div className="border-b border-daw-border bg-[#121620] px-3 py-2">
+            <div className="shrink-0 border-b border-[#292c31] bg-[#15171a] p-2">
                 <svg
-                    className="h-8 w-full cursor-pointer"
+                    data-piano-cinema-ribbon="true"
+                    className="h-11 w-full cursor-pointer rounded-[2px] outline-none ring-cyan-300/40 transition-shadow focus-visible:ring-1 motion-reduce:transition-none md:h-9"
                     viewBox={`0 0 ${keyboard.width} ${headerHeight}`}
                     preserveAspectRatio="none"
                     onClick={handleSeekRibbonClick}
+                    onKeyDown={handleSeekRibbonKeyDown}
+                    role="slider"
+                    tabIndex={0}
+                    aria-label="Posición del transporte de Keys-fi"
+                    aria-valuemin={0}
+                    aria-valuemax={Math.max(16, total16ths)}
+                    aria-valuenow={clamp(playhead16th, 0, Math.max(16, total16ths))}
+                    aria-valuetext={`Compás ${musicalBar}, pulso ${musicalBeat}`}
                 >
-                    <rect x={0} y={0} width={keyboard.width} height={headerHeight} fill="rgba(10,12,18,0.98)" />
-                    {Array.from({ length: Math.max(1, Math.ceil(total16ths / 16)) }, (_, index) => {
-                        const x = (index / Math.max(1, Math.ceil(total16ths / 16))) * keyboard.width;
+                    <defs>
+                        <linearGradient id={`${idPrefix}-ribbon-bg`} x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#111316" />
+                            <stop offset="100%" stopColor="#0c0e10" />
+                        </linearGradient>
+                    </defs>
+                    <rect x={0} y={0} width={keyboard.width} height={headerHeight} rx={2} fill={`url(#${idPrefix}-ribbon-bg)`} />
+                    <rect
+                        x={0}
+                        y={headerHeight - 3}
+                        width={(clamp(playhead16th, 0, Math.max(16, total16ths)) / Math.max(16, total16ths)) * keyboard.width}
+                        height={2}
+                        fill="rgba(103,232,249,0.46)"
+                    />
+                    {ribbonMarkers.map((bar) => {
+                        const x = (bar / totalBars) * keyboard.width;
                         return (
-                            <g key={`seek-bar-${index}`}>
-                                <line x1={x} y1={6} x2={x} y2={30} stroke="rgba(148,163,184,0.2)" strokeWidth={1} />
-                                <text x={x + 6} y={15} fill="rgba(148,163,184,0.58)" fontSize={9} letterSpacing="0.2em">
-                                    {index + 1}
+                            <g key={`seek-bar-${bar}`} data-piano-cinema-ribbon-marker={bar + 1}>
+                                <line x1={x} y1={7} x2={x} y2={29} stroke="rgba(148,153,161,0.24)" strokeWidth={bar % 4 === 0 ? 1 : 0.65} />
+                                <text x={x + 4} y={14} fill="rgba(174,178,185,0.62)" fontSize={8} fontWeight={600}>
+                                    {bar + 1}
                                 </text>
                             </g>
                         );
                     })}
                     <line
                         ref={ribbonPlayheadRef}
+                        data-piano-cinema-playhead="true"
                         x1={(clamp(playhead16th, 0, Math.max(16, total16ths)) / Math.max(16, total16ths)) * keyboard.width}
-                        y1={4}
+                        y1={3}
                         x2={(clamp(playhead16th, 0, Math.max(16, total16ths)) / Math.max(16, total16ths)) * keyboard.width}
-                        y2={32}
-                        stroke="rgba(52,211,242,0.95)"
-                        strokeWidth={3}
+                        y2={33}
+                        stroke="rgba(103,232,249,0.9)"
+                        strokeWidth={2}
                     />
                 </svg>
             </div>
 
-            <div className="relative min-h-0 flex-1 bg-[#12141b] p-3">
+            <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0d0f11] p-2">
                 <svg
                     ref={svgRef}
-                    className="block h-full w-full rounded-sm bg-[#0b0e14]"
+                    data-piano-cinema-stage="true"
+                    data-piano-cinema-surface="workstation"
+                    className="block h-full w-full touch-none rounded-[2px] bg-[#101214]"
                     viewBox={`0 0 ${keyboard.width} ${mainHeight}`}
-                    preserveAspectRatio="xMidYMid meet"
+                    preserveAspectRatio="none"
+                    role="group"
+                    aria-labelledby={`${stageTitleId} ${stageDescriptionId}`}
+                    onLostPointerCapture={(event) => {
+                        setDragState((current) => current?.pointerId === event.pointerId ? null : current);
+                    }}
                 >
+                    <title id={stageTitleId}>Visualizador Keys-fi</title>
+                    <desc id={stageDescriptionId}>Notas musicales descienden hacia un teclado sincronizado con el transporte. Las notas se pueden seleccionar, mover y redimensionar.</desc>
                     <defs>
-                        <linearGradient id="cinema-note-fill" x1="0%" y1="0%" x2="0%" y2="100%">
-                            <stop offset="0%" stopColor="rgba(52,211,242,0.95)" />
-                            <stop offset="100%" stopColor="rgba(168,85,247,0.92)" />
+                        <linearGradient id={`${idPrefix}-stage-bg`} x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#15171a" />
+                            <stop offset="100%" stopColor="#0e1012" />
+                        </linearGradient>
+                        <linearGradient id={`${idPrefix}-note-idle`} x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#b2b7bf" />
+                            <stop offset="100%" stopColor="#727983" />
+                        </linearGradient>
+                        <linearGradient id={`${idPrefix}-note-active`} x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#d5f8fb" />
+                            <stop offset="100%" stopColor="#55c6cf" />
+                        </linearGradient>
+                        <linearGradient id={`${idPrefix}-white-key`} x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#e5e7e9" />
+                            <stop offset="72%" stopColor="#c9cdd1" />
+                            <stop offset="100%" stopColor="#aeb3b8" />
+                        </linearGradient>
+                        <linearGradient id={`${idPrefix}-white-key-active`} x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#e7fafb" />
+                            <stop offset="100%" stopColor="#78cbd1" />
+                        </linearGradient>
+                        <linearGradient id={`${idPrefix}-black-key`} x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#34383e" />
+                            <stop offset="100%" stopColor="#111316" />
+                        </linearGradient>
+                        <linearGradient id={`${idPrefix}-black-key-active`} x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stopColor="#9de4e8" />
+                            <stop offset="100%" stopColor="#388f96" />
+                        </linearGradient>
+                        <linearGradient id={`${idPrefix}-key-reflection`} x1="0%" y1="100%" x2="0%" y2="0%">
+                            <stop offset="0%" stopColor="rgba(103,232,249,0.13)" />
+                            <stop offset="100%" stopColor="rgba(103,232,249,0)" />
                         </linearGradient>
                     </defs>
 
-                    <rect x={0} y={0} width={keyboard.width} height={mainHeight} fill="rgba(9,12,18,0.98)" />
+                    <rect x={0} y={0} width={keyboard.width} height={mainHeight} fill={`url(#${idPrefix}-stage-bg)`} />
 
-                    <g ref={motionLayerRef}>
+                    <g data-piano-cinema-lane-grid="true" aria-hidden="true">
+                        {keyboard.whiteKeys.map((key, index) => (
+                            <React.Fragment key={`lane-${key.pitch}`}>
+                                <rect
+                                    x={key.x}
+                                    y={0}
+                                    width={key.width}
+                                    height={keyboardTop}
+                                    fill={index % 2 === 0 ? 'rgba(255,255,255,0.012)' : 'rgba(0,0,0,0.035)'}
+                                />
+                                <line
+                                    x1={key.x}
+                                    y1={0}
+                                    x2={key.x}
+                                    y2={keyboardTop}
+                                    stroke="rgba(148,153,161,0.08)"
+                                    strokeWidth={0.6}
+                                />
+                            </React.Fragment>
+                        ))}
+                    </g>
+
+                    <g ref={motionLayerRef} style={{ willChange: 'transform' }}>
                         {Array.from({ length: Math.ceil((lookAhead16ths + lookBehind16ths) / 4) }, (_, index) => {
                             const timeline16th = playhead16th - lookBehind16ths + (index * 4);
                             const y = keyboardTop - (timeline16th * pixelsPer16th);
+                            const isBar = index % 4 === 0;
                             return (
-                                <g key={`grid-${index}`}>
-                                    <line
-                                        x1={0}
-                                        y1={y}
-                                        x2={keyboard.width}
-                                        y2={y}
-                                        stroke={index % 4 === 0 ? 'rgba(148,163,184,0.16)' : 'rgba(71,85,105,0.12)'}
-                                        strokeWidth={index % 4 === 0 ? 1.2 : 1}
-                                    />
-                                </g>
+                                <line
+                                    key={`grid-${index}`}
+                                    x1={0}
+                                    y1={y}
+                                    x2={keyboard.width}
+                                    y2={y}
+                                    stroke={isBar ? 'rgba(187,191,198,0.18)' : 'rgba(148,153,161,0.09)'}
+                                    strokeWidth={isBar ? 1 : 0.65}
+                                    aria-hidden="true"
+                                />
                             );
                         })}
 
@@ -349,35 +492,48 @@ const PianoCinema: React.FC<PianoCinemaProps> = ({
 
                             const isSelected = note.noteKey === selectedNoteKey;
                             const isActive = activeIndexSet.has(note.index) || livePitchSet.has(note.pitch);
+                            const velocity = normalizeMidiVelocity(note.velocity);
                             const noteWidth = frame.black ? frame.width + 4 : frame.width - 4;
                             const noteX = frame.black ? frame.x - 2 : frame.x + 2;
-                            const glow = isActive ? 'rgba(52,211,242,0.35)' : 'rgba(168,85,247,0.12)';
 
                             return (
-                                <g key={note.noteKey}>
+                                <g key={note.noteKey} data-piano-cinema-note={midiNoteLabel(note.pitch)}>
                                     <rect
-                                        x={noteX - 1}
-                                        y={noteTop - 2}
-                                        width={noteWidth + 2}
-                                        height={noteHeight + 4}
-                                        rx={4}
-                                        fill={glow}
-                                        opacity={isSelected || isActive ? 1 : 0.5}
+                                        x={noteX + 1.5}
+                                        y={noteTop + 2}
+                                        width={noteWidth}
+                                        height={noteHeight}
+                                        rx={2}
+                                        fill="rgba(0,0,0,0.34)"
+                                        pointerEvents="none"
                                     />
                                     <rect
+                                        data-piano-cinema-note-body="true"
                                         x={noteX}
                                         y={noteTop}
                                         width={noteWidth}
                                         height={noteHeight}
-                                        rx={4}
-                                        fill="url(#cinema-note-fill)"
-                                        opacity={isSelected || isActive ? 0.96 : 0.82}
-                                        stroke={isSelected ? '#f8fafc' : 'rgba(15,23,42,0.55)'}
-                                        strokeWidth={isSelected ? 1.75 : 1}
-                                        className="cursor-pointer"
+                                        rx={2}
+                                        fill={`url(#${idPrefix}-${isActive ? 'note-active' : 'note-idle'})`}
+                                        opacity={isSelected || isActive ? 1 : 0.68 + ((velocity / 127) * 0.24)}
+                                        stroke={isSelected ? '#67e8f9' : isActive ? 'rgba(207,250,254,0.8)' : 'rgba(17,19,22,0.82)'}
+                                        strokeWidth={isSelected ? 1.6 : 0.8}
+                                        className="cursor-pointer outline-none"
+                                        role="button"
+                                        tabIndex={isSelected || (!selectedNoteKey && note.index === laneNotes[0]?.index) ? 0 : -1}
+                                        aria-label={`${midiNoteLabel(note.pitch)}, inicio ${note.start.toFixed(2)}, duración ${note.duration.toFixed(2)}, velocidad ${velocity}`}
+                                        aria-pressed={isSelected}
+                                        onKeyDown={(event) => {
+                                            if (event.key !== 'Enter' && event.key !== ' ') return;
+                                            event.preventDefault();
+                                            onSelectNoteKey?.(note.noteKey);
+                                        }}
                                         onPointerDown={(event) => {
+                                            event.preventDefault();
+                                            svgRef.current?.setPointerCapture?.(event.pointerId);
                                             onSelectNoteKey?.(note.noteKey);
                                             setDragState({
+                                                pointerId: event.pointerId,
                                                 noteIndex: note.index,
                                                 mode: 'move',
                                                 originPointerY: ((event.clientY - event.currentTarget.getBoundingClientRect().top) + (event.currentTarget.getBoundingClientRect().top - svgRef.current!.getBoundingClientRect().top)) * (mainHeight / svgRef.current!.getBoundingClientRect().height),
@@ -388,17 +544,43 @@ const PianoCinema: React.FC<PianoCinemaProps> = ({
                                         }}
                                     />
                                     <rect
+                                        x={noteX + 1}
+                                        y={noteTop + 1}
+                                        width={Math.max(1, (noteWidth - 2) * (velocity / 127))}
+                                        height={2.5}
+                                        rx={1}
+                                        fill={isActive ? 'rgba(255,255,255,0.82)' : 'rgba(239,241,244,0.56)'}
+                                        pointerEvents="none"
+                                    />
+                                    {noteHeight >= 24 && (
+                                        <text
+                                            x={noteX + (noteWidth / 2)}
+                                            y={noteTop + 14}
+                                            textAnchor="middle"
+                                            fill={isActive ? 'rgba(16,42,45,0.86)' : 'rgba(24,27,31,0.82)'}
+                                            fontSize={7}
+                                            fontWeight={700}
+                                            pointerEvents="none"
+                                        >
+                                            {midiNoteLabel(note.pitch)}
+                                        </text>
+                                    )}
+                                    <rect
                                         x={noteX}
                                         y={noteTop}
                                         width={noteWidth}
                                         height={5}
                                         rx={2}
-                                        fill="rgba(248,250,252,0.7)"
+                                        fill="rgba(255,255,255,0.01)"
                                         className="cursor-ns-resize"
+                                        aria-hidden="true"
                                         onPointerDown={(event) => {
+                                            event.preventDefault();
                                             event.stopPropagation();
+                                            svgRef.current?.setPointerCapture?.(event.pointerId);
                                             onSelectNoteKey?.(note.noteKey);
                                             setDragState({
+                                                pointerId: event.pointerId,
                                                 noteIndex: note.index,
                                                 mode: 'trim-duration',
                                                 originPointerY: ((event.clientY - event.currentTarget.getBoundingClientRect().top) + (event.currentTarget.getBoundingClientRect().top - svgRef.current!.getBoundingClientRect().top)) * (mainHeight / svgRef.current!.getBoundingClientRect().height),
@@ -413,95 +595,147 @@ const PianoCinema: React.FC<PianoCinemaProps> = ({
                         })}
                     </g>
 
-                    <line
-                        x1={0}
-                        y1={keyboardTop}
-                        x2={keyboard.width}
-                        y2={keyboardTop}
-                        stroke="rgba(52,211,242,0.75)"
-                        strokeWidth={2}
-                    />
+                    <g aria-hidden="true">
+                        {Array.from(activePitchSet).map((pitch) => {
+                            const frame = keyboard.keyFrames.get(pitch);
+                            if (!frame) return null;
+                            return (
+                                <rect
+                                    key={`key-reflection-${pitch}`}
+                                    data-piano-cinema-key-reflection={midiNoteLabel(pitch)}
+                                    x={frame.x}
+                                    y={keyboardTop - 22}
+                                    width={frame.width}
+                                    height={22}
+                                    fill={`url(#${idPrefix}-key-reflection)`}
+                                />
+                            );
+                        })}
+                    </g>
 
-                    {keyboard.whiteKeys.map((key) => {
-                        const isLit = livePitchSet.has(key.pitch) || laneNotes.some((note) => activeIndexSet.has(note.index) && note.pitch === key.pitch);
-                        return (
-                            <rect
-                                key={`white-${key.pitch}`}
-                                x={key.x}
-                                y={keyboardTop}
-                                width={key.width}
-                                height={keyboardHeight}
-                                fill={isLit ? 'rgba(224,242,254,0.96)' : 'rgba(245,247,250,0.95)'}
-                                stroke="rgba(15,23,42,0.3)"
-                                strokeWidth={1}
-                            />
-                        );
-                    })}
+                    <line x1={0} y1={keyboardTop} x2={keyboard.width} y2={keyboardTop} stroke="rgba(103,232,249,0.72)" strokeWidth={1.4} />
+                    <rect x={0} y={keyboardTop + keyboardHeight - 3} width={keyboard.width} height={4} fill="rgba(0,0,0,0.48)" />
 
-                    {keyboard.blackKeys.map((key) => {
-                        const isLit = livePitchSet.has(key.pitch) || laneNotes.some((note) => activeIndexSet.has(note.index) && note.pitch === key.pitch);
-                        return (
-                            <rect
-                                key={`black-${key.pitch}`}
-                                x={key.x}
-                                y={keyboardTop}
-                                width={key.width}
-                                height={keyboardHeight * 0.62}
-                                rx={3}
-                                fill={isLit ? 'rgba(52,211,242,0.95)' : 'rgba(10,12,18,0.98)'}
-                                stroke={isLit ? 'rgba(224,242,254,0.4)' : 'rgba(255,255,255,0.04)'}
-                                strokeWidth={1}
-                            />
-                        );
-                    })}
+                    <g data-piano-cinema-keyboard="true">
+                        {keyboard.whiteKeys.map((key) => {
+                            const isLit = activePitchSet.has(key.pitch);
+                            return (
+                                <g key={`white-${key.pitch}`}>
+                                    <rect
+                                        data-piano-key={midiNoteLabel(key.pitch)}
+                                        x={key.x}
+                                        y={keyboardTop}
+                                        width={key.width}
+                                        height={keyboardHeight}
+                                        rx={1}
+                                        fill={`url(#${idPrefix}-${isLit ? 'white-key-active' : 'white-key'})`}
+                                        stroke={isLit ? 'rgba(70,160,168,0.78)' : 'rgba(32,35,39,0.48)'}
+                                        strokeWidth={isLit ? 1.1 : 0.75}
+                                    />
+                                    <line
+                                        x1={key.x + 1.5}
+                                        y1={keyboardTop + keyboardHeight - 7}
+                                        x2={key.x + key.width - 1.5}
+                                        y2={keyboardTop + keyboardHeight - 7}
+                                        stroke="rgba(56,60,66,0.18)"
+                                        strokeWidth={1}
+                                    />
+                                    {key.pitch % 12 === 0 && (
+                                        <text
+                                            x={key.x + (key.width / 2)}
+                                            y={keyboardTop + keyboardHeight - 11}
+                                            textAnchor="middle"
+                                            fill="rgba(45,49,54,0.65)"
+                                            fontSize={7}
+                                            fontWeight={700}
+                                            pointerEvents="none"
+                                        >
+                                            {midiNoteLabel(key.pitch)}
+                                        </text>
+                                    )}
+                                </g>
+                            );
+                        })}
+
+                        {keyboard.blackKeys.map((key) => {
+                            const isLit = activePitchSet.has(key.pitch);
+                            return (
+                                <g key={`black-${key.pitch}`}>
+                                    <rect
+                                        x={key.x + 1}
+                                        y={keyboardTop + 2}
+                                        width={key.width}
+                                        height={keyboardHeight * 0.62}
+                                        rx={2}
+                                        fill="rgba(0,0,0,0.42)"
+                                    />
+                                    <rect
+                                        data-piano-key={midiNoteLabel(key.pitch)}
+                                        x={key.x}
+                                        y={keyboardTop}
+                                        width={key.width}
+                                        height={keyboardHeight * 0.62}
+                                        rx={2}
+                                        fill={`url(#${idPrefix}-${isLit ? 'black-key-active' : 'black-key'})`}
+                                        stroke={isLit ? 'rgba(207,250,254,0.55)' : 'rgba(255,255,255,0.08)'}
+                                        strokeWidth={isLit ? 1 : 0.65}
+                                    />
+                                </g>
+                            );
+                        })}
+                    </g>
                 </svg>
+
+                <div className="pointer-events-none absolute left-4 top-4 rounded-sm border border-[#33363b] bg-[#17191c]/92 px-2 py-1 text-[8px] font-semibold uppercase tracking-[0.12em] text-[#a1a6ad]">
+                    {musicalBar}.{musicalBeat}
+                </div>
+                <div className="pointer-events-none absolute right-4 top-4 rounded-sm border border-[#33363b] bg-[#17191c]/92 px-2 py-1 text-[8px] font-semibold uppercase tracking-[0.12em] text-[#858a92]">
+                    {midiNoteLabel(pitchRange.min)} — {midiNoteLabel(pitchRange.max)}
+                </div>
 
                 {laneNotes.length === 0 && livePitches.length === 0 && (
                     <div className="pointer-events-none absolute inset-6 flex items-center justify-center">
-                        <div className="max-w-xl rounded-sm border border-dashed border-white/10 bg-[#0f1219]/96 px-5 py-4 text-center">
-                            <div className="text-[10px] font-bold uppercase tracking-wider text-gray-500">{emptyTitle}</div>
-                            <div className="mt-2 text-sm leading-6 text-gray-400">
-                                {emptyMessage}
-                            </div>
+                        <div className="max-w-xl rounded-sm border border-dashed border-[#3b3e44] bg-[#17191c]/96 px-6 py-5 text-center">
+                            <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#b2b6bc]">{emptyTitle}</div>
+                            <div className="mt-2 text-sm leading-6 text-[#7f848b]">{emptyMessage}</div>
                         </div>
                     </div>
                 )}
             </div>
 
-            <div className="flex items-center justify-between gap-4 border-t border-daw-border bg-[#11131a] px-3 py-2 text-xs text-gray-300">
+            <div className="flex min-h-10 shrink-0 flex-col items-stretch justify-between gap-2 border-t border-[#2d3035] bg-[#181a1d] px-3 py-2 text-xs text-[#b2b6bc] sm:flex-row sm:items-center sm:gap-4">
                 <div className="flex min-w-0 items-center gap-3">
-                    <span className="rounded-sm border border-white/10 bg-[#151824] px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-gray-400">
-                        Editor Time
+                    <span className="rounded-sm border border-[#383b41] bg-[#121416] px-2 py-1 text-[8px] font-bold uppercase tracking-[0.12em] text-[#7f848b]">
+                        Note
                     </span>
-                    <span className="truncate">
+                    <span className="truncate text-[11px] text-[#9a9fa6]">
                         {selectedNote
-                            ? `Pitch ${selectedNote.pitch} | Start ${selectedNote.start.toFixed(2)} | Dur ${selectedNote.duration.toFixed(2)}`
+                            ? `${midiNoteLabel(selectedNote.pitch)} · Pitch ${selectedNote.pitch} · Start ${selectedNote.start.toFixed(2)} · Dur ${selectedNote.duration.toFixed(2)}`
                             : 'Selecciona una nota para editarla desde el piano inferior.'}
                     </span>
                 </div>
 
-                <div className="flex items-center gap-3">
-                    <label className="flex items-center gap-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Velocity</span>
-                        <input
-                            type="range"
-                            min={1}
-                            max={127}
-                            value={selectedNote ? normalizeMidiVelocity(selectedNote.velocity) : 96}
-                            disabled={!selectedNote}
-                            onChange={(event) => {
-                                if (!selectedNote) return;
-                                onUpdateNote?.(selectedNote.index, {
-                                    pitch: selectedNote.pitch,
-                                    start: selectedNote.start,
-                                    duration: selectedNote.duration,
-                                    velocity: normalizeMidiVelocity(Number(event.target.value))
-                                });
-                            }}
-                            className="accent-daw-cyan"
-                        />
-                    </label>
-                </div>
+                <label className="flex min-h-11 shrink-0 items-center gap-2 sm:min-h-0">
+                    <span className="text-[8px] font-bold uppercase tracking-[0.12em] text-[#72777e]">Velocity</span>
+                    <input
+                        type="range"
+                        min={1}
+                        max={127}
+                        value={selectedNote ? normalizeMidiVelocity(selectedNote.velocity) : 96}
+                        disabled={!selectedNote}
+                        aria-label="Velocidad de la nota seleccionada"
+                        onChange={(event) => {
+                            if (!selectedNote) return;
+                            onUpdateNote?.(selectedNote.index, {
+                                pitch: selectedNote.pitch,
+                                start: selectedNote.start,
+                                duration: selectedNote.duration,
+                                velocity: normalizeMidiVelocity(Number(event.target.value))
+                            });
+                        }}
+                        className="h-1.5 min-w-0 flex-1 cursor-pointer accent-cyan-300 disabled:cursor-not-allowed disabled:opacity-35 sm:w-24 sm:flex-none"
+                    />
+                </label>
             </div>
         </div>
     );

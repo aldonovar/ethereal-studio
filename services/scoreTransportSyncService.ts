@@ -6,8 +6,40 @@ const clamp = (value: number, min: number, max: number): number => Math.min(max,
 export interface ScoreTransportFrame {
     playhead16th: number;
     playheadBarTime: number;
+    globalPlayhead16th: number;
     activeNoteIndexes: number[];
+    isWithinClip: boolean;
+    audiblePitchShiftSemitones: number;
 }
+
+export interface ScoreClipTransportContext {
+    sourceKind: 'audio' | 'midi';
+    noteTimeDomain?: 'source-grid' | 'clip-local';
+    clipStartBar: number;
+    clipLengthBars: number;
+    clipOffsetBars: number;
+    playbackRate?: number;
+    sourceOriginalBpm?: number;
+    noteGridBpm?: number;
+    projectBpm?: number;
+    isWarped?: boolean;
+    clipTransposeSemitones?: number;
+    trackTransposeSemitones?: number;
+    masterTransposeSemitones?: number;
+}
+
+export interface ScoreClipTransportTransform {
+    clipStart16th: number;
+    clipEnd16th: number;
+    clipOffset16th: number;
+    sourceGridRate: number;
+    audiblePitchShiftSemitones: number;
+}
+
+const finiteOr = (value: number | undefined, fallback: number): number => (
+    Number.isFinite(value) ? Number(value) : fallback
+);
+const ARRANGE_BAR_16THS = 16;
 
 export const getMeasure16thsForScore = (timeSignature: [number, number]): number => {
     const numerator = Math.max(1, Math.round(timeSignature[0] || 4));
@@ -43,24 +75,163 @@ export const timeline16thToBarTime = (timeline16th: number, timeSignature: [numb
     return 1 + barIndex + (offsetInBar / measure16ths);
 };
 
+export const getScoreClipTransportTransform = (
+    context: ScoreClipTransportContext
+): ScoreClipTransportTransform => {
+    const safeStartBar = Math.max(1, finiteOr(context.clipStartBar, 1));
+    const safeLengthBars = Math.max(1 / 64, finiteOr(context.clipLengthBars, 1));
+    const safeOffsetBars = Math.max(0, finiteOr(context.clipOffsetBars, 0));
+    // Arrange/audioEngine defines every clip bar as four quarter notes, even if
+    // the notation view uses another time signature.
+    const clipStart16th = (safeStartBar - 1) * ARRANGE_BAR_16THS;
+    const clipEnd16th = clipStart16th + (safeLengthBars * ARRANGE_BAR_16THS);
+    const clipOffset16th = safeOffsetBars * ARRANGE_BAR_16THS;
+
+    const clipTranspose = clamp(Math.round(finiteOr(context.clipTransposeSemitones, 0)), -24, 24);
+    const trackTranspose = finiteOr(context.trackTransposeSemitones, 0);
+    const masterTranspose = finiteOr(context.masterTransposeSemitones, 0);
+    const totalTransposeSemitones = clipTranspose + trackTranspose + masterTranspose;
+
+    if (context.sourceKind === 'midi') {
+        return {
+            clipStart16th,
+            clipEnd16th,
+            clipOffset16th,
+            sourceGridRate: 1,
+            audiblePitchShiftSemitones: totalTransposeSemitones
+        };
+    }
+
+    const playbackRate = clamp(finiteOr(context.playbackRate, 1), 0.25, 4);
+    const projectBpm = Math.max(1, finiteOr(context.projectBpm, 120));
+    const sourceOriginalBpm = Math.max(1, finiteOr(context.sourceOriginalBpm, projectBpm));
+    const noteGridBpm = Math.max(1, finiteOr(context.noteGridBpm, sourceOriginalBpm));
+    const transposeRate = context.isWarped ? 1 : Math.pow(2, totalTransposeSemitones / 12);
+    const effectiveSourceRate = (projectBpm / sourceOriginalBpm) * playbackRate * transposeRate;
+
+    // audioEngine consumes source seconds at:
+    // (projectBpm / sourceOriginalBpm) * playbackRate * transposeRate.
+    // Convert that rate into the note grid used by the transcription result.
+    const sourceGridRate = Math.max(0.0001, effectiveSourceRate * (noteGridBpm / projectBpm));
+    const audiblePitchShiftSemitones = context.isWarped
+        ? totalTransposeSemitones
+        : 12 * Math.log2(Math.max(0.0001, effectiveSourceRate));
+
+    return {
+        clipStart16th,
+        clipEnd16th,
+        clipOffset16th,
+        sourceGridRate,
+        audiblePitchShiftSemitones
+    };
+};
+
+export const globalTimeline16thToScoreSource16th = (
+    globalTimeline16th: number,
+    context: ScoreClipTransportContext
+): number => {
+    const transform = getScoreClipTransportTransform(context);
+    const clipLocal16th = globalTimeline16th - transform.clipStart16th;
+    if (context.noteTimeDomain === 'clip-local') {
+        return clipLocal16th;
+    }
+    return (clipLocal16th + transform.clipOffset16th) * transform.sourceGridRate;
+};
+
+export const scoreSource16thToGlobalTimeline16th = (
+    sourceTimeline16th: number,
+    context: ScoreClipTransportContext
+): number => {
+    const transform = getScoreClipTransportTransform(context);
+    if (context.noteTimeDomain === 'clip-local') {
+        return clamp(
+            transform.clipStart16th + Math.max(0, sourceTimeline16th),
+            transform.clipStart16th,
+            transform.clipEnd16th
+        );
+    }
+    const unclamped = transform.clipStart16th
+        + (Math.max(0, sourceTimeline16th) / transform.sourceGridRate)
+        - transform.clipOffset16th;
+    return clamp(unclamped, transform.clipStart16th, transform.clipEnd16th);
+};
+
+export const normalizeScoreNotesToAudibleClipWindow = <T extends Note>(
+    notes: readonly T[],
+    context: ScoreClipTransportContext
+): T[] => {
+    const transform = getScoreClipTransportTransform(context);
+    const sourceGridRate = Math.max(0.0001, transform.sourceGridRate);
+    const clipDuration16th = Math.max(0, transform.clipEnd16th - transform.clipStart16th);
+    const inputIsClipLocal = context.noteTimeDomain === 'clip-local';
+    const inputGridRate = inputIsClipLocal ? 1 : sourceGridRate;
+    const inputWindowStart16th = inputIsClipLocal ? 0 : transform.clipOffset16th * sourceGridRate;
+    const inputWindowEnd16th = inputWindowStart16th + (clipDuration16th * inputGridRate);
+    const epsilon = 1e-6;
+
+    return notes.flatMap((note) => {
+        const sourceNoteStart = finiteOr(note.start, 0);
+        const sourceNoteDuration = Math.max(0, finiteOr(note.duration, 0));
+        const sourceNoteEnd = sourceNoteStart + sourceNoteDuration;
+        const clippedSourceStart = Math.max(sourceNoteStart, inputWindowStart16th);
+        const clippedSourceEnd = Math.min(sourceNoteEnd, inputWindowEnd16th);
+
+        if (clippedSourceEnd - clippedSourceStart <= epsilon) {
+            return [];
+        }
+
+        const localStart = clamp(
+            (clippedSourceStart - inputWindowStart16th) / inputGridRate,
+            0,
+            clipDuration16th
+        );
+        const localEnd = clamp(
+            (clippedSourceEnd - inputWindowStart16th) / inputGridRate,
+            localStart,
+            clipDuration16th
+        );
+
+        if (localEnd - localStart <= epsilon) {
+            return [];
+        }
+
+        return [{
+            ...note,
+            start: localStart,
+            duration: localEnd - localStart
+        } as T];
+    }).sort((left, right) => left.start - right.start || left.pitch - right.pitch);
+};
+
 export const buildScoreTransportFrame = (
     notes: Note[],
     clockSnapshot: TransportClockSnapshot,
     timeSignature: [number, number],
     bpm = 120,
-    renderNow = Date.now()
+    renderNow = Date.now(),
+    clipContext?: ScoreClipTransportContext
 ): ScoreTransportFrame => {
+    const transportGridTimeSignature: [number, number] = clipContext ? [4, 4] : timeSignature;
     const playheadBarTime = transportClockToBarTime(clockSnapshot);
-    const basePlayhead16th = barTimeToTimeline16th(playheadBarTime, timeSignature);
+    const basePlayhead16th = barTimeToTimeline16th(playheadBarTime, transportGridTimeSignature);
     const msPer16th = Math.max(1, 60000 / Math.max(1, bpm) / 4);
     const elapsed16ths = clockSnapshot.isPlaying && clockSnapshot.updatedAt > 0
         ? Math.max(0, renderNow - clockSnapshot.updatedAt) / msPer16th
         : 0;
-    const playhead16th = basePlayhead16th + elapsed16ths;
+    const globalPlayhead16th = basePlayhead16th + elapsed16ths;
+    const transform = clipContext
+        ? getScoreClipTransportTransform(clipContext)
+        : null;
+    const playhead16th = clipContext
+        ? globalTimeline16thToScoreSource16th(globalPlayhead16th, clipContext)
+        : globalPlayhead16th;
+    const isWithinClip = transform
+        ? globalPlayhead16th >= transform.clipStart16th && globalPlayhead16th < transform.clipEnd16th
+        : true;
     const activeNoteIndexes = notes.reduce<number[]>((indexes, note, index) => {
         const noteStart = note.start;
         const noteEnd = note.start + note.duration;
-        if (playhead16th >= noteStart && playhead16th <= noteEnd) {
+        if (isWithinClip && playhead16th >= noteStart && playhead16th < noteEnd) {
             indexes.push(index);
         }
         return indexes;
@@ -69,7 +240,10 @@ export const buildScoreTransportFrame = (
     return {
         playhead16th,
         playheadBarTime,
-        activeNoteIndexes
+        globalPlayhead16th,
+        activeNoteIndexes,
+        isWithinClip,
+        audiblePitchShiftSemitones: transform?.audiblePitchShiftSemitones ?? 0
     };
 };
 

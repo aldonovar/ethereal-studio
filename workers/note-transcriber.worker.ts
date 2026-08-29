@@ -1,8 +1,15 @@
 /// <reference lib="webworker" />
 
-import { NoteScanResult, NoteScanSettings } from '../services/noteScannerService';
+import type { NoteScanResult, NoteScanSettings } from '../services/noteScannerService.ts';
+import {
+    buildPolaritySafeMono,
+    calibrateWindowedBounds,
+    centsFromMidi,
+    findInterpolatedPeak,
+    refineEnvelopeBounds
+} from '../services/transcriptionPrecisionService.ts';
 
-interface WorkerScanPayload {
+export interface WorkerScanPayload {
     channels: Float32Array[];
     sampleRate: number;
     bpm: number;
@@ -29,7 +36,8 @@ interface FrameCandidate {
     midi: number;
     score: number;
     confidence: number;
-    fundamental: number;
+    frequency: number;
+    detuningCents: number;
 }
 
 interface ActivePitchState {
@@ -41,6 +49,8 @@ interface ActivePitchState {
     confidenceSum: number;
     confidenceCount: number;
     velocityPeak: number;
+    frequencyWeightedSum: number;
+    frequencyWeight: number;
 }
 
 interface ActivePolyItem {
@@ -49,7 +59,11 @@ interface ActivePolyItem {
     confidence: number;
 }
 
-const workerScope: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope;
+const workerScope: DedicatedWorkerGlobalScope | null = (
+    typeof WorkerGlobalScope !== 'undefined'
+    && typeof self !== 'undefined'
+    && self instanceof WorkerGlobalScope
+) ? self as DedicatedWorkerGlobalScope : null;
 
 const HARMONIC_WEIGHTS = [1, 0.86, 0.62, 0.44, 0.32, 0.22];
 
@@ -66,26 +80,11 @@ const quantizeToGrid = (value: number, gridStep: number): number => {
 };
 
 const postProgress = (payload: WorkerProgressPayload) => {
-    workerScope.postMessage({ type: 'progress', payload });
+    workerScope?.postMessage({ type: 'progress', payload });
 };
 
 const downmixToMono = (channels: Float32Array[]): Float32Array => {
-    if (channels.length === 0) return new Float32Array(0);
-    if (channels.length === 1) return channels[0];
-
-    const length = channels[0].length;
-    const mono = new Float32Array(length);
-    const inv = 1 / channels.length;
-
-    for (let i = 0; i < length; i++) {
-        let sum = 0;
-        for (let ch = 0; ch < channels.length; ch++) {
-            sum += channels[ch][i];
-        }
-        mono[i] = sum * inv;
-    }
-
-    return mono;
+    return buildPolaritySafeMono(channels);
 };
 
 const removeDcAndPreEmphasis = (source: Float32Array): Float32Array => {
@@ -103,7 +102,10 @@ const removeDcAndPreEmphasis = (source: Float32Array): Float32Array => {
     for (let i = 1; i < source.length; i++) {
         const centered = source[i] - mean;
         const previousCentered = source[i - 1] - mean;
-        output[i] = centered - (0.965 * previousCentered);
+        // A very strong pre-emphasis erases quiet bass fundamentals whenever an
+        // upper octave is present. Keep enough tilt for spectral clarity without
+        // turning real low-register voicings into missing-fundamental aliases.
+        output[i] = centered - (0.84 * previousCentered);
     }
 
     return output;
@@ -258,7 +260,7 @@ const enforcePolyphonyLimit = (notes: NoteScanResult['notes'], maxPolyphony: num
     return sorted.filter((_, id) => !rejected.has(id));
 };
 
-const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
+export const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
     const { channels, bpm, settings } = payload;
 
     postProgress({ stage: 'preparing', progress: 0.02, message: 'Preparando analisis polifonico...' });
@@ -302,8 +304,27 @@ const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
     let analyzedFrames = 0;
 
     const finalizeNote = (midi: number, state: ActivePitchState) => {
-        const startSec = (state.startFrame * hopSize) / sampleRate;
-        const endSec = ((state.lastSeenFrame * hopSize) + (frameSize * 0.35)) / sampleRate;
+        const coarseBounds = calibrateWindowedBounds(
+            state.startFrame,
+            state.lastSeenFrame,
+            hopSize,
+            frameSize,
+            sampleRate
+        );
+        const coarseDuration16th = Math.max(
+            0,
+            (coarseBounds.endSec - coarseBounds.startSec) / secondsPer16th
+        );
+        if (coarseDuration16th < settings.minDuration16th) return;
+
+        const { startSec, endSec } = refineEnvelopeBounds(
+            signal,
+            sampleRate,
+            coarseBounds.startSec,
+            coarseBounds.endSec,
+            Math.min(0.16, (frameSize * 0.58) / sampleRate),
+            midiToFrequency(midi)
+        );
         const start16th = startSec / secondsPer16th;
         const duration16th = Math.max(0, (endSec - startSec) / secondsPer16th);
         if (duration16th < settings.minDuration16th) return;
@@ -326,7 +347,9 @@ const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
             duration: duration16th,
             velocity,
             confidence: avgConfidence,
-            frequency: midiToFrequency(midi)
+            frequency: state.frequencyWeight > 0
+                ? state.frequencyWeightedSum / state.frequencyWeight
+                : midiToFrequency(midi)
         });
     };
 
@@ -356,7 +379,8 @@ const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
         }
 
         const scores: number[] = new Array(midiCandidates.length).fill(0);
-        const fundamentals: number[] = new Array(midiCandidates.length).fill(0);
+        const estimatedFrequencies: number[] = new Array(midiCandidates.length).fill(0);
+        const detunings: number[] = new Array(midiCandidates.length).fill(0);
         let maxScore = 1e-12;
         let sumScore = 0;
 
@@ -366,29 +390,46 @@ const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
             let score = 0;
             let weightTotal = 0;
             let fundamental = 0;
+            let estimatedFrequency = frequency;
 
             for (let h = 1; h <= HARMONIC_WEIGHTS.length; h++) {
                 const harmonicFreq = frequency * h;
                 if (harmonicFreq >= nyquist * 0.98) break;
 
                 const bin = harmonicFreq / binHz;
-                const peak = localPeak(magnitude, bin, h === 1 ? 2 : 1);
+                const peakDetail = findInterpolatedPeak(magnitude, bin, h === 1 ? 2 : 1);
+                const peak = peakDetail.magnitude;
                 const weight = HARMONIC_WEIGHTS[h - 1];
 
                 score += peak * weight;
                 weightTotal += weight;
-                if (h === 1) fundamental = peak;
+                if (h === 1) {
+                    fundamental = peak;
+                    estimatedFrequency = peakDetail.bin * binHz;
+                }
             }
 
             const subPenalty = frequency > 70
                 ? localPeak(magnitude, (frequency * 0.5) / binHz, 2) * 0.34
                 : 0;
 
-            let normalizedScore = Math.max(0, (score / Math.max(1e-9, weightTotal)) - subPenalty);
+            const harmonicMean = score / Math.max(1e-9, weightTotal);
+            const fundamentalPresence = clamp(
+                fundamental / Math.max(1e-12, harmonicMean * 1.35),
+                0,
+                1
+            );
+            const missingFundamentalGuard = 0.3 + (Math.sqrt(fundamentalPresence) * 0.7);
+            let normalizedScore = Math.max(0, (harmonicMean * missingFundamentalGuard) - subPenalty);
             normalizedScore /= Math.pow(frequency, 0.08);
 
+            const detuningCents = centsFromMidi(estimatedFrequency, midiCandidates[i].midi);
+            const pitchCloseness = Math.exp(-0.5 * Math.pow(detuningCents / 42, 2));
+            normalizedScore *= 0.76 + (pitchCloseness * 0.24);
+
             scores[i] = normalizedScore;
-            fundamentals[i] = fundamental;
+            estimatedFrequencies[i] = estimatedFrequency;
+            detunings[i] = detuningCents;
             sumScore += normalizedScore;
             if (normalizedScore > maxScore) maxScore = normalizedScore;
         }
@@ -421,7 +462,8 @@ const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
                     midi: midiCandidates[i].midi,
                     score,
                     confidence,
-                    fundamental: fundamentals[i]
+                    frequency: estimatedFrequencies[i],
+                    detuningCents: detunings[i]
                 });
             }
         }
@@ -435,14 +477,10 @@ const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
             const semitoneConflict = selected.some((sel) => Math.abs(sel.midi - candidate.midi) <= 1);
             if (semitoneConflict) continue;
 
-            const octaveConflict = selected.find((sel) => Math.abs(sel.midi - candidate.midi) === 12);
-            if (octaveConflict) {
-                const clearlyWeaker =
-                    candidate.fundamental < (octaveConflict.fundamental * 0.58)
-                    && candidate.score < (octaveConflict.score * 0.88);
-                if (clearlyWeaker) continue;
-            }
-
+            // Do not reject octaves or open voicings from a single spectral frame.
+            // A quieter real bass note and a subharmonic alias have indistinguishable
+            // score ratios here; temporal confirmation and neural/physical fusion
+            // provide safer evidence later in the pipeline.
             selected.push(candidate);
             if (selected.length >= settings.maxPolyphony) break;
         }
@@ -450,7 +488,12 @@ const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
         return {
             detections: selected.map((candidate) => ({
                 ...candidate,
-                confidence: clamp((candidate.confidence * 0.8) + (energyNorm * 0.2), 0, 1)
+                confidence: clamp(
+                    ((candidate.confidence * 0.8) + (energyNorm * 0.2))
+                    * (0.88 + (0.12 * Math.exp(-0.5 * Math.pow(candidate.detuningCents / 50, 2)))),
+                    0,
+                    1
+                )
             })),
             energyNorm
         };
@@ -476,6 +519,9 @@ const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
                 active.confidenceSum += detection.confidence;
                 active.confidenceCount += 1;
                 active.velocityPeak = Math.max(active.velocityPeak, detection.confidence);
+                const frequencyWeight = Math.max(0.05, detection.confidence);
+                active.frequencyWeightedSum += detection.frequency * frequencyWeight;
+                active.frequencyWeight += frequencyWeight;
                 return;
             }
 
@@ -491,7 +537,9 @@ const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
                     peakScore: detection.score,
                     confidenceSum: detection.confidence,
                     confidenceCount: 1,
-                    velocityPeak: detection.confidence
+                    velocityPeak: detection.confidence,
+                    frequencyWeightedSum: detection.frequency * Math.max(0.05, detection.confidence),
+                    frequencyWeight: Math.max(0.05, detection.confidence)
                 });
                 pendingStarts.delete(midi);
             }
@@ -567,7 +615,7 @@ const analyzePolyphonicNotes = (payload: WorkerScanPayload): NoteScanResult => {
     };
 };
 
-workerScope.onmessage = (event: MessageEvent<WorkerIncomingMessage>) => {
+if (workerScope) workerScope.onmessage = (event: MessageEvent<WorkerIncomingMessage>) => {
     const message = event.data;
     if (!message || message.type !== 'scan') return;
 

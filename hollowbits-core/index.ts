@@ -1,6 +1,78 @@
 export const CORE_CONTRACT_VERSION = '2026.05-local-first';
 export const PROJECT_SCHEMA_VERSION = '3.0-reference';
 
+/**
+ * The public product map is deliberately independent from a browser or
+ * Electron runtime.  Both clients consume this same contract so a link to a
+ * DAW-fi surface does not silently create an isolated product or identity.
+ */
+export type DawfiSurface = 'site' | 'studio' | 'documentation' | 'desktop';
+
+export const DAWFI_CANONICAL_ORIGINS = {
+  site: 'https://www.hollowbits.com',
+  studio: 'https://play.hollowbits.com',
+} as const;
+
+export const DAWFI_DOCUMENTATION_PATH = '/docs';
+
+export const DAWFI_STUDIO_PATHS = [
+  '/login',
+  '/signup',
+  '/console',
+  '/settings',
+  '/engine',
+  '/score',
+  '/keys',
+] as const;
+
+export const DAWFI_SURFACES: Readonly<Record<DawfiSurface, {
+  label: string;
+  canonicalOrigin: string | null;
+  path: string;
+  requiresBrowser: boolean;
+}>> = {
+  site: {
+    label: 'DAW-fi',
+    canonicalOrigin: DAWFI_CANONICAL_ORIGINS.site,
+    path: '/',
+    requiresBrowser: true,
+  },
+  studio: {
+    label: 'DAW-fi Studio',
+    canonicalOrigin: DAWFI_CANONICAL_ORIGINS.studio,
+    path: '/console',
+    requiresBrowser: true,
+  },
+  documentation: {
+    label: 'DAW-fi Documentation',
+    canonicalOrigin: DAWFI_CANONICAL_ORIGINS.site,
+    path: DAWFI_DOCUMENTATION_PATH,
+    requiresBrowser: true,
+  },
+  desktop: {
+    label: 'DAW-fi Desktop',
+    canonicalOrigin: null,
+    path: '/',
+    requiresBrowser: false,
+  },
+};
+
+export const isSafeDawfiPath = (value: string | null | undefined): value is string =>
+  typeof value === 'string'
+  && value.startsWith('/')
+  && !value.startsWith('//')
+  && !value.includes('\\')
+  && !/[\r\n]/.test(value);
+
+export const toDawfiSurfaceUrl = (
+  surface: Exclude<DawfiSurface, 'desktop'>,
+  path = DAWFI_SURFACES[surface].path,
+): string => {
+  const definition = DAWFI_SURFACES[surface];
+  const safePath = isSafeDawfiPath(path) ? path : definition.path;
+  return `${definition.canonicalOrigin}${safePath}`;
+};
+
 export type Tier = 'free' | 'pro' | 'studio';
 export type WorkspaceRole = 'owner' | 'admin' | 'editor' | 'commenter' | 'viewer';
 export type UsageMetric =
@@ -319,6 +391,7 @@ export const TRACK_CONTRACT_FIELDS = [
 export const ECOSYSTEM_CONTRACT = {
   version: CORE_CONTRACT_VERSION,
   projectSchemaVersion: PROJECT_SCHEMA_VERSION,
+  surfaces: DAWFI_SURFACES,
   buckets: STORAGE_BUCKETS,
   tiers: TIER_LIMITS,
   featureFlags: TIER_FLAGS,

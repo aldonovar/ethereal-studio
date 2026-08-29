@@ -3,6 +3,11 @@ import { Pause, Play, RotateCcw, SkipBack, SkipForward, Volume2 } from 'lucide-r
 import { DetectedMidiNote } from '../services/noteScannerService';
 import { audioEngine } from '../services/audioEngine';
 import { proPianoEngine } from '../services/proPianoEngine';
+import {
+    buildSynthesiaPitchViewport,
+    midiNoteLabel,
+    normalizePianoPitch
+} from '../services/synthesiaLayoutService';
 
 interface SynthesiaVisualizerProps {
     notes: DetectedMidiNote[];
@@ -143,11 +148,13 @@ const SynthesiaVisualizer: React.FC<SynthesiaVisualizerProps> = ({
     const timelineNotes = useMemo<TimedNote[]>(() => {
         return notes
             .map((note, id) => {
+                const pitch = normalizePianoPitch(note.pitch);
+                if (pitch === null) return null;
                 const startSec = note.start * secondsPer16th;
                 const endSec = (note.start + note.duration) * secondsPer16th;
                 return {
                     id,
-                    pitch: clamp(Math.round(note.pitch), PIANO_MIN_MIDI, PIANO_MAX_MIDI),
+                    pitch,
                     velocity: note.velocity,
                     confidence: note.confidence,
                     frequency: note.frequency || pitchToFrequency(note.pitch),
@@ -155,6 +162,7 @@ const SynthesiaVisualizer: React.FC<SynthesiaVisualizerProps> = ({
                     endSec
                 };
             })
+            .filter((note): note is TimedNote => note !== null)
             .sort((a, b) => a.startSec - b.startSec || b.pitch - a.pitch);
     }, [notes, secondsPer16th]);
 
@@ -163,8 +171,9 @@ const SynthesiaVisualizer: React.FC<SynthesiaVisualizerProps> = ({
         [notes]
     );
 
-    const minPitch = PIANO_MIN_MIDI;
-    const maxPitch = PIANO_MAX_MIDI;
+    const pitchViewport = useMemo(() => buildSynthesiaPitchViewport(notes), [notes]);
+    const minPitch = pitchViewport.minPitch;
+    const maxPitch = pitchViewport.maxPitch;
 
     const keyboardLayout = useMemo(() => {
         const whiteKeys: WhiteKey[] = [];
@@ -704,6 +713,18 @@ const SynthesiaVisualizer: React.FC<SynthesiaVisualizerProps> = ({
         ctx.stroke();
         ctx.lineWidth = 1;
 
+        activePitches.forEach((pitch) => {
+            const centerRatio = keyboardLayout.centerByPitch.get(pitch);
+            if (centerRatio === undefined) return;
+            const centerX = centerRatio * width;
+            const beam = ctx.createLinearGradient(0, chartTop, 0, playLineY);
+            beam.addColorStop(0, 'rgba(168,124,232,0)');
+            beam.addColorStop(0.72, 'rgba(168,124,232,0.035)');
+            beam.addColorStop(1, 'rgba(236,112,152,0.2)');
+            ctx.fillStyle = beam;
+            ctx.fillRect(centerX - (whiteKeyWidth * 0.46), chartTop, whiteKeyWidth * 0.92, chartHeight);
+        });
+
         timelineNotes.forEach((note) => {
             const noteStartSec = note.startSec;
             const noteEndSec = note.endSec;
@@ -731,17 +752,40 @@ const SynthesiaVisualizer: React.FC<SynthesiaVisualizerProps> = ({
             gradient.addColorStop(0.12, fill);
             gradient.addColorStop(1, 'rgba(9,10,15,0.5)');
 
-            ctx.fillStyle = gradient;
-            ctx.fillRect(x + 0.5, yTop, w, h);
-
-            ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-            ctx.strokeRect(x + 0.5, yTop, w, h);
-
             ctx.shadowColor = fill;
-            ctx.shadowBlur = 9;
-            ctx.fillStyle = 'rgba(255,255,255,0.26)';
-            ctx.fillRect(x + 0.5, yTop, w, Math.max(1, h * 0.08));
+            ctx.shadowBlur = noteStartSec <= playheadSeconds ? 18 : 10;
+            ctx.beginPath();
+            ctx.roundRect(x + 0.5, yTop, w, h, Math.min(5, w * 0.22, h * 0.16));
+            ctx.fillStyle = gradient;
+            ctx.fill();
+            ctx.strokeStyle = `rgba(255,255,255,${0.18 + (note.confidence * 0.28)})`;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.roundRect(x + 1.5, yTop + 1, Math.max(1, w - 2), Math.max(1, Math.min(4, h * 0.09)), 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.42)';
+            ctx.fill();
             ctx.shadowBlur = 0;
+
+            if (w >= 18 && h >= 28) {
+                ctx.fillStyle = 'rgba(255,255,255,0.78)';
+                ctx.font = '600 9px ui-monospace, monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText(midiNoteLabel(note.pitch), x + (w / 2), Math.min(yTop + 15, yTop + h - 4));
+            }
+        });
+
+        activePitches.forEach((pitch) => {
+            const centerRatio = keyboardLayout.centerByPitch.get(pitch);
+            if (centerRatio === undefined) return;
+            const x = centerRatio * width;
+            const impact = ctx.createRadialGradient(x, playLineY, 0, x, playLineY, whiteKeyWidth * 1.55);
+            const color = pitchColor(pitch, minPitch, maxPitch, 1);
+            impact.addColorStop(0, 'rgba(255,255,255,0.94)');
+            impact.addColorStop(0.14, color.replace('rgb(', 'rgba(').replace(')', ' / 0.72)'));
+            impact.addColorStop(1, 'rgba(168,124,232,0)');
+            ctx.fillStyle = impact;
+            ctx.fillRect(x - (whiteKeyWidth * 1.6), playLineY - 24, whiteKeyWidth * 3.2, 28);
         });
 
         ctx.strokeStyle = accentColor;
@@ -750,6 +794,7 @@ const SynthesiaVisualizer: React.FC<SynthesiaVisualizerProps> = ({
         ctx.globalAlpha = 1;
     }, [
         accentColor,
+        activePitches,
         keyboardLayout.centerByPitch,
         keyboardLayout.whiteCount,
         keyboardLayout.whiteKeys,
@@ -850,7 +895,10 @@ const SynthesiaVisualizer: React.FC<SynthesiaVisualizerProps> = ({
                             Motor Grand Piano Integrado
                         </div>
                         <div className="flex items-center gap-1 px-2 h-7 rounded-sm border border-white/10 bg-[#171d2a] text-[9px] uppercase tracking-wider text-gray-300">
-                            Rango A0-C8
+                            Rango inteligente {pitchViewport.label}
+                        </div>
+                        <div className="flex items-center gap-1 px-2 h-7 rounded-sm border border-emerald-400/20 bg-emerald-400/10 text-[9px] uppercase tracking-wider text-emerald-300">
+                            {pitchViewport.noteCount} notas · modo Synthesia
                         </div>
                     </div>
 

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   CORE_CONTRACT_VERSION,
+  DAWFI_CANONICAL_ORIGINS,
+  DAWFI_STUDIO_PATHS,
   PROJECT_SCHEMA_VERSION,
   STORAGE_BUCKETS,
   TIER_FLAGS,
@@ -8,6 +10,8 @@ import {
   TRACK_CONTRACT_FIELDS,
   getTierLimits,
   isAllowedStorageBucket,
+  isSafeDawfiPath,
+  toDawfiSurfaceUrl,
 } from '@hollowbits/core';
 
 describe('ecosystem core contract', () => {
@@ -45,5 +49,17 @@ describe('ecosystem core contract', () => {
     expect(TRACK_CONTRACT_FIELDS).toContain('sidechainSourceTrackId');
     expect(TRACK_CONTRACT_FIELDS).toContain('isFrozen');
     expect(TRACK_CONTRACT_FIELDS).toContain('frozenBufferSourceId');
+  });
+
+  it('keeps the product topology shared without accepting unsafe redirects', () => {
+    expect(DAWFI_CANONICAL_ORIGINS.studio).toBe('https://play.hollowbits.com');
+    expect(DAWFI_STUDIO_PATHS).toContain('/settings');
+    expect(toDawfiSurfaceUrl('studio', '/login?next=%2Fconsole')).toBe(
+      'https://play.hollowbits.com/login?next=%2Fconsole',
+    );
+    expect(isSafeDawfiPath('/console')).toBe(true);
+    expect(isSafeDawfiPath('//attacker.example')).toBe(false);
+    expect(isSafeDawfiPath('/\\\\attacker.example')).toBe(false);
+    expect(toDawfiSurfaceUrl('site', '//attacker.example')).toBe('https://www.hollowbits.com/');
   });
 });

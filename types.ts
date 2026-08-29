@@ -542,6 +542,13 @@ export interface FileData {
   path?: string;
 }
 
+export interface SelectedAudioFile {
+  name: string;
+  path: string;
+  size?: number;
+  data?: ArrayBuffer;
+}
+
 export type ExportAudioFormat = 'wav' | 'aiff' | 'flac' | 'mp3';
 
 export interface AudioTranscodeRequest {
@@ -577,9 +584,9 @@ export interface DesktopWindowState {
 }
 
 export interface DesktopOpenEditorRequest {
+  product?: 'studio' | 'score' | 'keys';
   projectId?: string;
   shareToken?: string;
-  localPath?: string;
 }
 
 export interface DesktopAuthRequest {
@@ -587,10 +594,89 @@ export interface DesktopAuthRequest {
   prompt?: 'select_account' | 'none';
 }
 
+export type DesktopAuthErrorCode =
+  | 'AUTH_GOOGLE_PROVIDER_DISABLED'
+  | 'AUTH_REDIRECT_NOT_ALLOWED'
+  | 'AUTH_CALLBACK_INVALID'
+  | 'AUTH_STATE_MISMATCH'
+  | 'AUTH_DESKTOP_HANDOFF_EXPIRED'
+  | 'AUTH_DESKTOP_HANDOFF_REPLAYED'
+  | 'AUTH_NETWORK_UNAVAILABLE'
+  | 'AUTH_CONFIGURATION_MISSING'
+  | 'AUTH_CONFIGURATION_MISMATCH'
+  | 'AUTH_USER_CANCELLED';
+
+export interface DesktopAuthSessionPayload {
+  access_token: string;
+  refresh_token: string;
+  expires_in?: number;
+  expires_at?: number;
+  token_type?: string;
+}
+
 export interface DesktopAuthLaunchResult {
   success: boolean;
-  url?: string;
-  state?: string;
+  requestId?: string;
+  persistence?: 'encrypted' | 'memory';
+  errorCode?: DesktopAuthErrorCode;
+  error?: string;
+}
+
+export interface DesktopAuthCallbackResult extends DesktopAuthLaunchResult {
+  session?: DesktopAuthSessionPayload;
+}
+
+export interface DesktopProjectWriteStartRequest {
+  defaultName: string;
+  totalBytes: number;
+  sha256: string;
+}
+
+export interface DesktopProjectWriteStartResult {
+  canceled: boolean;
+  sessionId?: string;
+  chunkBytes?: number;
+}
+
+export interface DesktopProjectWriteChunkRequest {
+  sessionId: string;
+  offset: number;
+  data: ArrayBuffer;
+  sha256: string;
+}
+
+export interface DesktopProjectWriteChunkResult {
+  nextOffset: number;
+}
+
+export interface DesktopProjectReadStartResult {
+  sessionId: string;
+  filename: string;
+  totalBytes: number;
+  chunkBytes: number;
+}
+
+export interface DesktopProjectReadChunkRequest {
+  sessionId: string;
+  offset: number;
+  length: number;
+}
+
+export interface DesktopProjectReadChunkResult {
+  offset: number;
+  nextOffset: number;
+  data: ArrayBuffer;
+}
+
+export interface DesktopProjectSessionRequest {
+  sessionId: string;
+}
+
+export interface DesktopProjectFileResult {
+  success: boolean;
+  canceled?: boolean;
+  filePath?: string;
+  backupFileName?: string;
   error?: string;
 }
 
@@ -603,16 +689,27 @@ export interface DesktopHostAPI {
   openEditor?: (request?: DesktopOpenEditorRequest) => Promise<{ success: boolean; error?: string }>;
   showHub?: () => Promise<{ success: boolean; error?: string }>;
   openDesktopAuth?: (request?: DesktopAuthRequest) => Promise<DesktopAuthLaunchResult>;
+  cancelDesktopAuth?: () => Promise<{ success: boolean; error?: string }>;
   openExternalUrl?: (url: string) => Promise<{ success: boolean; error?: string }>;
-  getPendingAuthCallback?: () => Promise<string | null>;
-  onAuthCallback?: (callback: (url: string) => void) => (() => void);
+  getPendingAuthCallback?: () => Promise<DesktopAuthCallbackResult | null>;
+  onAuthCallback?: (callback: (result: DesktopAuthCallbackResult) => void) => (() => void);
+  getPersistedAuthSession?: () => Promise<DesktopAuthSessionPayload | null>;
+  persistAuthSession?: (session: DesktopAuthSessionPayload) => Promise<DesktopAuthLaunchResult>;
+  clearPersistedAuthSession?: () => Promise<{ success: boolean; error?: string }>;
   onHubRefresh?: (callback: () => void) => (() => void);
-  selectFiles: () => Promise<FileData[]>;
+  selectFiles: () => Promise<SelectedAudioFile[]>;
   readFileFromPath?: (filePath: string) => Promise<FileData | null>;
   selectDirectory?: () => Promise<string | null>;
   scanDirectoryFiles?: (request: DirectoryScanRequest) => Promise<ScannedFileEntry[]>;
   saveProject: (data: string, filename: string) => Promise<{ success: boolean; filePath?: string }>;
   openProject: () => Promise<{ text: string; filename: string } | null>;
+  beginProjectSave?: (request: DesktopProjectWriteStartRequest) => Promise<DesktopProjectWriteStartResult>;
+  writeProjectSaveChunk?: (request: DesktopProjectWriteChunkRequest) => Promise<DesktopProjectWriteChunkResult>;
+  completeProjectSave?: (request: DesktopProjectSessionRequest) => Promise<DesktopProjectFileResult>;
+  cancelProjectSave?: (request: DesktopProjectSessionRequest) => Promise<{ success: boolean }>;
+  beginProjectRead?: () => Promise<DesktopProjectReadStartResult | null>;
+  readProjectChunk?: (request: DesktopProjectReadChunkRequest) => Promise<DesktopProjectReadChunkResult>;
+  closeProjectRead?: (request: DesktopProjectSessionRequest) => Promise<{ success: boolean }>;
   transcodeAudio?: (request: AudioTranscodeRequest) => Promise<AudioTranscodeResult>;
   onBenchmarkStart?: (callback: (config: LiveCaptureRunConfig) => void) => (() => void);
   publishBenchmarkArtifact?: (

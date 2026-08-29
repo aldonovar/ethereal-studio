@@ -654,7 +654,7 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                     </div>
 
                     <div className="p-3 space-y-1.5">
-                        <TabButton id="audio" label="Audio" subLabel="I/O Â· Latencia Â· Escucha" icon={Cpu} active={activeTab === 'audio'} onClick={setActiveTab} />
+                        <TabButton id="audio" label="Audio" subLabel="I/O · Latencia · Escucha" icon={Cpu} active={activeTab === 'audio'} onClick={setActiveTab} />
                         <TabButton id="midi" label="MIDI" subLabel="Controladores y actividad" icon={Piano} active={activeTab === 'midi'} onClick={setActiveTab} />
                         <TabButton id="content" label="Contenido" subLabel="Plugins + Libreria" icon={HardDrive} active={activeTab === 'content'} onClick={setActiveTab} />
                     </div>
@@ -825,7 +825,7 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                                                     <span className="uppercase tracking-wider">{result.status}</span>
                                                                 </div>
                                                                 <div className="mt-0.5 text-[9px] opacity-80">
-                                                                    activo {result.diagnostics.activeSampleRate}Hz Â· buffer {result.diagnostics.effectiveBufferSize} Â· peak {result.render.peakDb.toFixed(1)} dBFS
+                                                                    activo {result.diagnostics.activeSampleRate}Hz · buffer {result.diagnostics.effectiveBufferSize} · peak {result.render.peakDb.toFixed(1)} dBFS
                                                                 </div>
                                                                 {result.issues[0] && (
                                                                     <div className="mt-0.5 text-[9px] opacity-90">{result.issues[0]}</div>
@@ -940,10 +940,10 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                                                 ? 'border-amber-500/30 bg-amber-500/10 text-amber-100'
                                                                 : 'border-red-500/30 bg-red-500/10 text-red-100'}`}>
                                                             <div className="text-[9px] uppercase tracking-wider">
-                                                                Performance Gate Â· {benchmarkGate.status.toUpperCase()}
+                                                                Performance Gate · {benchmarkGate.status.toUpperCase()}
                                                             </div>
                                                             <div className="mt-0.5 text-[9px] opacity-90">
-                                                                drift p95 {benchmarkGate.summary.maxWorkletP95TickDriftMs.toFixed(1)}ms Â· drift p99 {benchmarkGate.summary.maxWorkletP99TickDriftMs.toFixed(1)}ms Â· lag p95 {benchmarkGate.summary.maxWorkletP95LagMs.toFixed(1)}ms Â· win-rate {(benchmarkGate.summary.workletWinRate * 100).toFixed(1)}%
+                                                                drift p95 {benchmarkGate.summary.maxWorkletP95TickDriftMs.toFixed(1)}ms · drift p99 {benchmarkGate.summary.maxWorkletP99TickDriftMs.toFixed(1)}ms · lag p95 {benchmarkGate.summary.maxWorkletP95LagMs.toFixed(1)}ms · win-rate {(benchmarkGate.summary.workletWinRate * 100).toFixed(1)}%
                                                             </div>
                                                             {benchmarkGate.issues[0] && (
                                                                 <div className="mt-0.5 text-[9px] opacity-95">{benchmarkGate.issues[0]}</div>
@@ -974,7 +974,7 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                                                 <div key={comparison.scenarioKey} className="text-[9px] text-gray-200 flex items-center justify-between gap-2">
                                                                     <span className="font-mono uppercase">{comparison.scenarioKey}</span>
                                                                     <span>
-                                                                        winner <b>{comparison.winner}</b> Â· drift p95 delta {comparison.driftP95ImprovementMs.toFixed(1)}ms Â· lag p95 delta {comparison.lagP95ImprovementMs.toFixed(1)}ms
+                                                                        winner <b>{comparison.winner}</b> · drift p95 delta {comparison.driftP95ImprovementMs.toFixed(1)}ms · lag p95 delta {comparison.lagP95ImprovementMs.toFixed(1)}ms
                                                                     </span>
                                                                 </div>
                                                             ))}
@@ -996,10 +996,10 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                                                     <span className="uppercase tracking-wider">{result.status}</span>
                                                                 </div>
                                                                 <div className="mt-0.5 text-[9px] opacity-80">
-                                                                    {result.metrics.scheduler.mode} Â· drift p95 {result.metrics.scheduler.p95TickDriftMs.toFixed(1)}ms Â· loop p99 {result.metrics.scheduler.p99LoopMs.toFixed(1)}ms Â· lag p95 {result.metrics.eventLoop.p95LagMs.toFixed(1)}ms
+                                                                    {result.metrics.scheduler.mode} · drift p95 {result.metrics.scheduler.p95TickDriftMs.toFixed(1)}ms · loop p99 {result.metrics.scheduler.p99LoopMs.toFixed(1)}ms · lag p95 {result.metrics.eventLoop.p95LagMs.toFixed(1)}ms
                                                                 </div>
                                                                 <div className="mt-0.5 text-[9px] opacity-80">
-                                                                    graph writes mix {result.metrics.graphUpdate.mixParamWrites} Â· sends {result.metrics.graphUpdate.sendLevelWrites}
+                                                                    graph writes mix {result.metrics.graphUpdate.mixParamWrites} · sends {result.metrics.graphUpdate.sendLevelWrites}
                                                                 </div>
                                                                 {result.issues[0] && (
                                                                     <div className="mt-0.5 text-[9px] opacity-90">{result.issues[0]}</div>
@@ -1141,8 +1141,8 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                     <MetricCard label="Current Latency" value={formatLatencyMs(engineStats.latency)} icon={Clock3} />
                                     <MetricCard label="Engine State" value={engineStats.state.toUpperCase()} icon={Gauge} />
                                     <MetricCard
-                                        label="Buffer (Reqâ†’Eff)"
-                                        value={`${String(engineStats.configuredBufferSize ?? 'auto')} â†’ ${Math.round(engineStats.effectiveBufferSize || 0)} smp`}
+                                        label="Buffer (Req→Eff)"
+                                        value={`${String(engineStats.configuredBufferSize ?? 'auto')} → ${Math.round(engineStats.effectiveBufferSize || 0)} smp`}
                                         icon={Cpu}
                                     />
                                     <MetricCard
@@ -1255,7 +1255,7 @@ const HardwareSettingsModal: React.FC<HardwareSettingsModalProps> = ({
                                                     <div className="min-w-0">
                                                         <div className="text-sm font-semibold text-white truncate">{device.name}</div>
                                                         <div className="text-[10px] uppercase tracking-wider text-gray-500 mt-1">
-                                                            {device.manufacturer || 'Generic MIDI'} Â· {device.state}
+                                                            {device.manufacturer || 'Generic MIDI'} · {device.state}
                                                         </div>
                                                     </div>
                                                     <div className="flex items-center gap-3 shrink-0">
@@ -1539,4 +1539,3 @@ const ScanManagerSection: React.FC<ScanManagerSectionProps> = ({
 const MemoizedHardwareSettingsModal = React.memo(HardwareSettingsModal);
 
 export { MemoizedHardwareSettingsModal as HardwareSettingsModal };
-

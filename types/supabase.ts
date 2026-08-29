@@ -379,6 +379,18 @@ export type Database = {
           user_agent: string
         }[]
       }
+      get_active_sessions_v2: {
+        Args: never
+        Returns: {
+          created_at: string
+          id: string
+          ip: string | null
+          last_active: string
+          tag: string | null
+          user_agent: string | null
+          is_current: boolean
+        }[]
+      }
       get_project_by_share_token: {
         Args: { p_token: string }
         Returns: {
@@ -436,6 +448,13 @@ export type Database = {
       revoke_device_session: {
         Args: { target_session_id: string }
         Returns: boolean
+      }
+      revoke_device_session_v2: {
+        Args: { target_session_id: string }
+        Returns: {
+          reason: string
+          revoked: boolean
+        }[]
       }
       update_render_job_status_with_scope: {
         Args: {

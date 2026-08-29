@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import DesktopRoot from './DesktopRoot';
+import { AppErrorBoundary } from './components/AppErrorBoundary';
 import './index.css';
 
 const rootElement = document.getElementById('root');
@@ -11,6 +12,8 @@ if (!rootElement) {
 const root = ReactDOM.createRoot(rootElement);
 root.render(
   <React.StrictMode>
-    <DesktopRoot />
+    <AppErrorBoundary>
+      <DesktopRoot />
+    </AppErrorBoundary>
   </React.StrictMode>
 );

@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { describe, expect, it } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';

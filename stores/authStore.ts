@@ -1,7 +1,17 @@
 import { create } from 'zustand';
 import type { AuthChangeEvent, Session, User } from '@supabase/supabase-js';
-import { supabase } from '../services/supabase';
+import { isSupabaseConfigured, supabase } from '../services/supabase';
+import type {
+  DesktopAuthCallbackResult,
+  DesktopAuthErrorCode,
+  DesktopAuthSessionPayload,
+} from '../types';
 import type { Profile } from '../types/supabase';
+
+interface DesktopAuthFeedback {
+  code?: DesktopAuthErrorCode;
+  message: string;
+}
 
 interface AuthState {
   session: Session | null;
@@ -9,12 +19,18 @@ interface AuthState {
   profile: Profile | null;
   isLoading: boolean;
   requiresMfa: boolean;
+  desktopAuthPending: boolean;
+  desktopAuthError: DesktopAuthFeedback | null;
   initialize: () => () => void;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   checkMfa: () => Promise<void>;
-  handleAuthCallback: (url: string) => Promise<boolean>;
+  setDesktopAuthPending: (pending: boolean) => void;
+  clearDesktopAuthError: () => void;
+  handleAuthCallback: (result: DesktopAuthCallbackResult) => Promise<boolean>;
 }
+
+const processedDesktopAuthRequests = new Set<string>();
 
 async function fetchProfile(userId: string): Promise<Profile | null> {
   try {
@@ -45,35 +61,54 @@ async function safeMfaCheck(): Promise<boolean> {
   }
 }
 
-async function exchangeSessionFromCallback(url: string): Promise<Session | null> {
-  if (!url) return null;
+function toDesktopSessionPayload(session: Session): DesktopAuthSessionPayload {
+  return {
+    access_token: session.access_token,
+    refresh_token: session.refresh_token,
+    expires_in: session.expires_in,
+    expires_at: session.expires_at,
+    token_type: session.token_type,
+  };
+}
 
-  const parsed = new URL(url);
-  const errorDescription = parsed.searchParams.get('error_description') || parsed.searchParams.get('error');
-  if (errorDescription) {
-    throw new Error(errorDescription);
+async function establishDesktopSession(payload: DesktopAuthSessionPayload | null | undefined): Promise<Session | null> {
+  if (!payload?.access_token || !payload.refresh_token || !isSupabaseConfigured) return null;
+  const { data, error } = await supabase.auth.setSession({
+    access_token: payload.access_token,
+    refresh_token: payload.refresh_token,
+  });
+  if (error) throw error;
+  return data.session;
+}
+
+async function persistSessionInMain(session: Session | null): Promise<void> {
+  const host = window.electron;
+  if (!host) return;
+  if (!session) {
+    await host.clearPersistedAuthSession?.();
+    return;
   }
+  await host.persistAuthSession?.(toDesktopSessionPayload(session));
+}
 
-  const hashParams = new URLSearchParams(parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash);
-  const accessToken = hashParams.get('access_token');
-  const refreshToken = hashParams.get('refresh_token');
-  if (accessToken && refreshToken) {
-    const { data, error } = await supabase.auth.setSession({
-      access_token: accessToken,
-      refresh_token: refreshToken,
-    });
-    if (error) throw error;
-    return data.session;
+function removeCredentialsFromRendererUrl(): void {
+  const search = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.startsWith('#') ? window.location.hash.slice(1) : '');
+  const sensitiveKeys = ['access_token', 'refresh_token', 'code'];
+  const hasSensitiveValue = sensitiveKeys.some((key) => search.has(key) || hash.has(key));
+  if (!hasSensitiveValue) return;
+
+  for (const key of sensitiveKeys) {
+    search.delete(key);
+    hash.delete(key);
   }
-
-  const code = parsed.searchParams.get('code');
-  if (code) {
-    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
-    if (error) throw error;
-    return data.session;
-  }
-
-  return null;
+  const nextSearch = search.toString();
+  const nextHash = hash.toString();
+  window.history.replaceState(
+    null,
+    '',
+    `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${nextHash ? `#${nextHash}` : ''}`,
+  );
 }
 
 async function hydrateSessionState(session: Session | null): Promise<Pick<AuthState, 'session' | 'user' | 'profile' | 'requiresMfa'>> {
@@ -105,8 +140,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   profile: null,
   isLoading: true,
   requiresMfa: false,
+  desktopAuthPending: false,
+  desktopAuthError: null,
 
   initialize: () => {
+    removeCredentialsFromRendererUrl();
+
+    if (!isSupabaseConfigured) {
+      set({
+        session: null,
+        user: null,
+        profile: null,
+        requiresMfa: false,
+        desktopAuthPending: false,
+        isLoading: false,
+      });
+      return () => undefined;
+    }
+
     const safetyTimeout = window.setTimeout(() => {
       if (get().isLoading) {
         console.warn('[authStore] Safety timeout - forcing isLoading=false');
@@ -116,23 +167,40 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     const hydrate = async () => {
       try {
-        const pendingDesktopCallback = await window.electron?.getPendingAuthCallback?.();
-        if (pendingDesktopCallback) {
-          await exchangeSessionFromCallback(pendingDesktopCallback);
+        let restoredSession: Session | null = null;
+        const pendingResult = await window.electron?.getPendingAuthCallback?.();
+        if (pendingResult) {
+          if (pendingResult.success) {
+            restoredSession = await establishDesktopSession(pendingResult.session);
+          } else {
+            set({
+              desktopAuthPending: false,
+              desktopAuthError: {
+                code: pendingResult.errorCode,
+                message: pendingResult.error || 'No se pudo completar el acceso con Google.',
+              },
+            });
+          }
         }
 
-        const hash = window.location.hash;
-        if (hash.includes('access_token=') && hash.includes('refresh_token=')) {
-          await exchangeSessionFromCallback(window.location.href);
-          window.history.replaceState(null, '', window.location.pathname + window.location.search);
+        if (!restoredSession) {
+          const persistedSession = await window.electron?.getPersistedAuthSession?.();
+          restoredSession = await establishDesktopSession(persistedSession);
         }
 
-        const { data: { session } } = await supabase.auth.getSession();
+        const session = restoredSession || (await supabase.auth.getSession()).data.session;
         const nextState = await hydrateSessionState(session);
-        set({ ...nextState, isLoading: false });
+        set({ ...nextState, desktopAuthPending: false, isLoading: false });
       } catch (error) {
         console.error('[authStore] Failed to hydrate session:', error);
-        set({ session: null, user: null, profile: null, requiresMfa: false, isLoading: false });
+        set({
+          session: null,
+          user: null,
+          profile: null,
+          requiresMfa: false,
+          desktopAuthPending: false,
+          isLoading: false,
+        });
       } finally {
         window.clearTimeout(safetyTimeout);
       }
@@ -142,7 +210,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (event: AuthChangeEvent, session: Session | null) => {
-        if (event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION') return;
+        if (event === 'SIGNED_OUT') {
+          void persistSessionInMain(null);
+        } else if (session && event !== 'INITIAL_SESSION') {
+          void persistSessionInMain(session);
+        }
+
+        if (event === 'INITIAL_SESSION') return;
 
         const hydrateChange = async () => {
           try {
@@ -154,7 +228,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         };
 
         void hydrateChange();
-      }
+      },
     );
 
     return () => {
@@ -165,15 +239,31 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   signOut: async () => {
     set({ isLoading: true });
+    if (!isSupabaseConfigured) {
+      await window.electron?.clearPersistedAuthSession?.();
+      set({ session: null, user: null, profile: null, requiresMfa: false, isLoading: false });
+      return;
+    }
     try {
-      const { error } = await supabase.auth.signOut();
+      // Keep the button's promise: it signs out this installation only.
+      // Revoking other devices is an explicit account-security action.
+      const { error } = await supabase.auth.signOut({ scope: 'local' });
       if (error) {
         console.error('[authStore] Sign-out error:', error.message);
       }
     } catch (error) {
       console.error('[authStore] Sign-out exception:', error);
     }
-    set({ session: null, user: null, profile: null, requiresMfa: false, isLoading: false });
+    await window.electron?.clearPersistedAuthSession?.();
+    set({
+      session: null,
+      user: null,
+      profile: null,
+      requiresMfa: false,
+      desktopAuthPending: false,
+      desktopAuthError: null,
+      isLoading: false,
+    });
   },
 
   refreshProfile: async () => {
@@ -188,17 +278,74 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ requiresMfa });
   },
 
-  handleAuthCallback: async (url: string) => {
-    set({ isLoading: true });
+  setDesktopAuthPending: (pending) => set({
+    desktopAuthPending: pending,
+    ...(pending ? { desktopAuthError: null } : {}),
+  }),
+
+  clearDesktopAuthError: () => set({ desktopAuthError: null }),
+
+  handleAuthCallback: async (result) => {
+    if (result.requestId && processedDesktopAuthRequests.has(result.requestId)) {
+      return Boolean(get().session);
+    }
+    if (result.requestId) {
+      processedDesktopAuthRequests.add(result.requestId);
+      if (processedDesktopAuthRequests.size > 32) {
+        processedDesktopAuthRequests.delete(processedDesktopAuthRequests.values().next().value as string);
+      }
+    }
+
+    if (!result.success || !result.session) {
+      // A browser may dispatch the same custom-protocol callback more than once
+      // (automatic attempt plus a manual retry). Once a valid session exists, a
+      // late replay notice must never replace that successful authenticated state.
+      if (result.errorCode === 'AUTH_DESKTOP_HANDOFF_REPLAYED' && get().session) {
+        set({
+          desktopAuthPending: false,
+          desktopAuthError: null,
+          isLoading: false,
+        });
+        return true;
+      }
+
+      set({
+        desktopAuthPending: false,
+        desktopAuthError: {
+          code: result.errorCode,
+          message: result.error || 'No se pudo completar el acceso con Google.',
+        },
+        isLoading: false,
+      });
+      return false;
+    }
+    if (!isSupabaseConfigured) {
+      set({
+        session: null,
+        user: null,
+        profile: null,
+        requiresMfa: false,
+        desktopAuthPending: false,
+        isLoading: false,
+      });
+      return false;
+    }
+
+    set({ isLoading: true, desktopAuthPending: false, desktopAuthError: null });
     try {
-      const session = await exchangeSessionFromCallback(url);
-      const fallbackSession = session || (await supabase.auth.getSession()).data.session;
-      const nextState = await hydrateSessionState(fallbackSession);
+      const session = await establishDesktopSession(result.session);
+      const nextState = await hydrateSessionState(session);
       set({ ...nextState, isLoading: false });
       return Boolean(nextState.session);
     } catch (error) {
       console.error('[authStore] Desktop auth callback failed:', error);
-      set({ isLoading: false });
+      set({
+        desktopAuthError: {
+          code: 'AUTH_CALLBACK_INVALID',
+          message: 'La sesión fue recibida, pero no pudo validarse.',
+        },
+        isLoading: false,
+      });
       return false;
     }
   },
