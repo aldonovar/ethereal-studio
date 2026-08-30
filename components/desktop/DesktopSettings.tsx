@@ -145,10 +145,23 @@ export function DesktopSettings({ onBack }: DesktopSettingsProps) {
 
   useEffect(() => {
     if (!user || !session) return;
-    const interval = window.setInterval(() => {
+
+    const refreshSessions = () => {
       void loadActiveSessions(session).then(setSessions).catch(() => undefined);
-    }, 30_000);
-    return () => window.clearInterval(interval);
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') refreshSessions();
+    };
+
+    const interval = window.setInterval(refreshSessions, 30_000);
+    window.addEventListener('focus', refreshSessions);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refreshSessions);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
   }, [user, session]);
 
   const handleSaveProfile = async () => {
