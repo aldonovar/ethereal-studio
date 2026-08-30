@@ -4,7 +4,8 @@ import {
     buildTransportRuntimeReport,
     buildLiveCaptureRunConfig,
     buildLiveCaptureStressReport,
-    createArtifactEnvelope
+    createArtifactEnvelope,
+    evaluateTransportSteadyRuntimeSamples
 } from '../../services/liveCaptureHarnessService';
 
 describe('liveCaptureHarnessService.buildLiveCaptureRunConfig', () => {
@@ -172,5 +173,53 @@ describe('liveCaptureHarnessService.buildTransportRuntimeReport', () => {
         expect(report.commandCounts.playCalls).toBe(3);
         expect(report.commandCounts.pauseCalls).toBe(2);
         expect(report.commandCounts.stopCalls).toBe(2);
+    });
+});
+
+describe('liveCaptureHarnessService.evaluateTransportSteadyRuntimeSamples', () => {
+    it('confirms an isolated runner stall with one healthy steady-state window', () => {
+        const evaluation = evaluateTransportSteadyRuntimeSamples([
+            {
+                activePlaybackSessionId: 3,
+                activeSourceCount: 12,
+                transportDriftP99Ms: 210.2,
+                dropoutCount: 1,
+                underrunCount: 1
+            },
+            {
+                activePlaybackSessionId: 3,
+                activeSourceCount: 12,
+                transportDriftP99Ms: 7.6,
+                dropoutCount: 0,
+                underrunCount: 0
+            }
+        ], 12);
+
+        expect(evaluation.pass).toBe(true);
+        expect(evaluation.selectedAttemptIndex).toBe(1);
+        expect(evaluation.attempts.map((attempt) => attempt.pass)).toEqual([false, true]);
+    });
+
+    it('keeps persistent scheduler degradation as a hard failure', () => {
+        const evaluation = evaluateTransportSteadyRuntimeSamples([
+            {
+                activePlaybackSessionId: 3,
+                activeSourceCount: 12,
+                transportDriftP99Ms: 180,
+                dropoutCount: 1,
+                underrunCount: 1
+            },
+            {
+                activePlaybackSessionId: 3,
+                activeSourceCount: 12,
+                transportDriftP99Ms: 140,
+                dropoutCount: 1,
+                underrunCount: 1
+            }
+        ], 12);
+
+        expect(evaluation.pass).toBe(false);
+        expect(evaluation.selectedAttemptIndex).toBe(1);
+        expect(evaluation.attempts.every((attempt) => !attempt.pass)).toBe(true);
     });
 });
