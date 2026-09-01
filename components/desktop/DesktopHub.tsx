@@ -299,6 +299,23 @@ function NotificationsMenu({ onPendingCountChange }: { onPendingCountChange?: (c
   );
 }
 
+function buildWorkspaceSlug(rawName: string): string {
+  const base = rawName
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 96)
+    .replace(/-+$/g, '') || 'workspace';
+  const suffix = crypto.getRandomValues(new Uint32Array(1))[0]
+    .toString(36)
+    .padStart(7, '0')
+    .slice(-7);
+
+  return `${base}-${suffix}`;
+}
+
 function CreateTeamModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
   const { user } = useAuthStore();
   const [name, setName] = useState('');
@@ -312,18 +329,12 @@ function CreateTeamModal({ onClose, onSuccess }: { onClose: () => void; onSucces
     setError(null);
 
     try {
-      const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Math.random().toString(36).slice(2, 7)}`;
-      const { data: workspace, error: createError } = await supabase
-        .from('workspaces')
-        .insert([{ name: name.trim(), slug, created_by: user.id, category }])
-        .select()
-        .single();
+      const { error: createError } = await supabase.rpc('create_workspace_with_owner', {
+        p_name: name.trim(),
+        p_slug: buildWorkspaceSlug(name),
+        p_category: category,
+      });
       if (createError) throw createError;
-
-      const { error: memberError } = await supabase
-        .from('workspace_members')
-        .insert([{ workspace_id: workspace.id, user_id: user.id, role: 'owner' }]);
-      if (memberError) throw memberError;
 
       onSuccess();
     } catch (error: any) {

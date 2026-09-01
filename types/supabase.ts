@@ -312,6 +312,14 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      create_workspace_with_owner: {
+        Args: {
+          p_category?: string | null
+          p_name: string
+          p_slug: string
+        }
+        Returns: string
+      }
       create_project_with_limit: {
         Args: {
           p_bpm?: number
