@@ -6,7 +6,7 @@ Status: in progress; visible-shell phase only.
 
 - Maintain the naming and compatibility registries.
 - Rename browser title, desktop title bar and hub copy to `DAW-fi`.
-- Add the Linux application entry and `SUPER+D` launcher.
+- Add the Linux application entry and `SUPER+ALT+D` launcher while preserving `SUPER+D` for Rofi.
 - Keep app id, user-data directory, protocol, storage keys and `.esp` unchanged.
 - Gate: local build, unit tests, visible Electron capture and shortcut verification.
 
