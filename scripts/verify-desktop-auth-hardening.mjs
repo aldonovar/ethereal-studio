@@ -9,6 +9,7 @@ const authCallbackCoordinator = read('electron/desktop-auth-callback-coordinator
 const preload = read('electron/preload.cjs');
 const desktopRoot = read('DesktopRoot.tsx');
 const desktopAuthUi = read('components/desktop/DesktopAuth.tsx');
+const desktopHub = read('components/desktop/DesktopHub.tsx');
 const authStore = read('stores/authStore.ts');
 const supabase = read('services/supabase.ts');
 const authContractModule = read('services/authContract.ts');
@@ -49,6 +50,9 @@ requireSnippet(desktopRoot, 'window.electron?.onAuthCallback?', 'Desktop root do
 requireSnippet(desktopRoot, 'void handleAuthCallback(url).then((success)', 'Desktop root does not await the renderer auth store result.');
 requireSnippet(authStore, "result.errorCode === 'AUTH_DESKTOP_HANDOFF_REPLAYED' && get().session", 'A late replay warning can overwrite an established Desktop session.');
 requireSnippet(desktopAuthUi, 'buildDesktopEmailConfirmationRedirectUrl()', 'Desktop email signup bypasses the explicit callback exchange.');
+requireSnippet(desktopHub, "supabase.rpc('create_workspace_with_owner'", 'Desktop workspace creation does not use the atomic shared RPC.');
+requireSnippet(desktopHub, 'crypto.getRandomValues', 'Desktop workspace slugs still use predictable entropy.');
+requireSnippet(desktopHub, ".slice(0, 96)\n    .replace(/-+$/g, '')", 'Desktop workspace slug truncation can leave an invalid trailing separator.');
 requireSnippet(authContractModule, 'DAWFI_AUTH_CONTRACT.authCallbackPath', 'Desktop email confirmation does not use the shared callback path.');
 requireSnippet(launcher, "read_public_env_value 'VITE_SUPABASE_ANON_KEY'", 'The launcher cannot load the public Supabase key used for PKCE exchange.');
 requireSnippet(launcher, '--password-store=gnome-libsecret', 'The Linux launcher does not select Secret Service when the compositor cannot infer a secure store.');
@@ -64,6 +68,9 @@ forbidSnippet(authStore, 'hashParams.get(\'access_token\')', 'Renderer still rea
 forbidSnippet(authStore, 'hashParams.get(\'refresh_token\')', 'Renderer still reads a refresh token from a URL fragment.');
 forbidSnippet(authStore, 'exchangeCodeForSession(code)', 'Renderer still exchanges a callback code outside the main-process broker.');
 forbidSnippet(desktopAuthUi, "searchParams.set('verified'", 'Desktop email confirmation still skips the explicit callback exchange.');
+forbidSnippet(desktopHub, ".from('workspaces')\n        .insert", 'Desktop can still create an orphan workspace outside the atomic RPC.');
+forbidSnippet(desktopHub, ".from('workspace_members')\n        .insert", 'Desktop can still create the initial owner outside the atomic RPC.');
+forbidSnippet(desktopHub, 'Math.random()', 'Desktop workspace slugs still use Math.random().');
 forbidSnippet(supabase, 'document.cookie', 'Supabase sessions are still persisted in JavaScript cookies.');
 forbidSnippet(launcher, 'source "${env_file}"', 'The launcher sources the entire env file into the privileged process.');
 
