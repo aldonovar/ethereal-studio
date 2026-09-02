@@ -5,7 +5,7 @@ Date: 2026-07-29
 | ID | Priority | Surface | Defect | State | Evidence / next gate |
 | --- | --- | --- | --- | --- | --- |
 | UX-001 | P0 | Desktop startup | Electron opened as a completely black window when Supabase variables were absent. | PASS | Fatal renderer import reproduced, replaced with explicit local mode; mapped visible screenshot and offline regression test pass. |
-| UX-002 | P0 | Desktop access | No direct keyboard/application launcher existed. | PASS | `SUPER+D`, stable `~/.local/bin/daw-fi`, Linux desktop entry and single-instance focus verified. |
+| UX-002 | P0 | Desktop access | No direct keyboard/application launcher existed. | PASS | `SUPER+ALT+D`, stable `~/.local/bin/daw-fi`, Linux desktop entry and single-instance focus verified; `SUPER+D` remains Rofi. |
 | UX-003 | P0 | Web/desktop auth | Access and refresh tokens are transported or parsed in URL fragments/deep links. | FAIL | Replace with opaque one-use code, PKCE/state/TTL/origin binding and replay tests before cloud login is enabled. |
 | UX-004 | P0 | Web AI | Browser bundle contains direct `@google/genai` provider code. | FAIL | Remove SDK, use authenticated gateway and add web artifact scan. |
 | UX-005 | P0 | Google auth | Desktop bridge button lacks the required recognizable local Google logo and shared states. | FAIL | Build shared accessible component and visual/keyboard/error tests after handoff contract. |

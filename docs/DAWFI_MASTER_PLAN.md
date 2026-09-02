@@ -34,7 +34,7 @@ Non-negotiable gates:
 | Restore local-first boot | PASS | Optional cloud client, auth short-circuit, disabled cloud actions and regression test implemented. |
 | Remove desktop provider SDK/secret injection | PASS | Server-only gateway boundary plus built-artifact security gate committed. |
 | Visible DAW-fi shell | PASS | Browser title, Electron windows, titlebar and hub use DAW-fi while legacy IDs remain. |
-| Direct desktop access | PASS | Stable user launcher, `.desktop` entry and `SUPER+D` installed and verified with single-instance behavior. |
+| Direct desktop access | PASS | Stable user launcher, `.desktop` entry and `SUPER+ALT+D` installed and verified with single-instance behavior; `SUPER+D` remains reserved for Rofi. |
 | Naming and compatibility registry | PASS | Rebrand registry, compatibility matrix and cutover plan exist. |
 | Desktop quality gate | PASS | 41 files / 166 tests, typecheck, build and client security gate. |
 | Web build/contract/Pages baseline | PASS | Build, contract, real local Pages routes, headers and `/engine` render exercised. |

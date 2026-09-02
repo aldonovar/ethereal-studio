@@ -7,7 +7,7 @@ Date: 2026-07-29
 | Surface | Source/runtime | Current identity | Verification | Mutation status |
 | --- | --- | --- | --- | --- |
 | Desktop development | `dawfi-relaunch`, Vite build + Electron | Visible `DAW-fi`; legacy `com.hollowbits.daw` and user-data identity | PASS on Linux/Hyprland with system Electron 42 | Local branch only |
-| Linux user access | `~/.local/bin/daw-fi`, user `.desktop`, Hyprland bind | `SUPER+D` / DAW-fi | PASS, one mapped window and single-instance behavior | Installed for current user |
+| Linux user access | `~/.local/bin/daw-fi`, user `.desktop`, Hyprland bind | `SUPER+ALT+D` / DAW-fi; `SUPER+D` / Rofi | PASS, one mapped window and single-instance behavior | Installed for current user |
 | Windows package | Electron Builder NSIS x64 | `HOLLOW BITS`, legacy app ID/shortcut | BLOCKED BY ENVIRONMENT | Not built or published |
 | Marketing web | `hollow-web` host-routed React app | `hollowbits.com` | Local Pages root route PASS; production behavior not re-smoked | No remote write |
 | Browser studio | same web build | `play.hollowbits.com`, `/engine` | Local Pages route/refresh/header/render PASS | No remote write |
@@ -62,7 +62,7 @@ Before any DAW-fi domain/app-ID/repository cutover:
   installed app identity.
 - Hyprland pre-change backup:
   `/home/aldonovar/.config/hypr/UserConfigs/UserKeybinds.conf.pre-dawfi-20260729`.
-- `SUPER+ALT+D` retains the previous application menu.
+- `SUPER+D` retains the application menu (Rofi); `SUPER+ALT+D` opens DAW-fi.
 - The stable launcher checks the recovery worktree first and the original desktop
   repository second, allowing integration to move after merge without changing
   the keybinding again.

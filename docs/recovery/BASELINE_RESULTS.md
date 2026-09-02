@@ -27,7 +27,7 @@ The only evidence states used below are `PASS`, `FAIL`, `SKIPPED`,
 | Initial Electron launch | FAIL | Renderer stopped before React mounted with `Missing Supabase environment variables: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY`; the visible result was a black window. |
 | Local-first startup without Supabase variables | PASS | Missing cloud configuration no longer throws during import; auth short-circuits safely and the hub reports local mode. |
 | Visible Electron launch | PASS | Hyprland reported one mapped, non-hidden window titled `DAW-fi`; screenshot: `/tmp/dawfi-super-d-current.png`. |
-| `SUPER+D` launcher | PASS | Runtime bind resolves to `/home/aldonovar/.local/bin/daw-fi`; a second launch leaves exactly one mapped DAW-fi window. |
+| `SUPER+ALT+D` launcher | PASS | Runtime bind resolves to `/home/aldonovar/.local/bin/daw-fi`; `SUPER+D` remains Rofi, and a second DAW-fi launch leaves exactly one mapped window. |
 | Linux desktop entry | PASS | Repository and installed entries pass `desktop-file-validate`; launcher scripts pass `bash -n`. |
 | Local project create/import/save/reopen | NOT EXECUTED | The hub and local-editor entry were rendered, but project lifecycle interaction was not completed in this block. |
 | Windows package/sign/install/update | BLOCKED BY ENVIRONMENT | Current host is Linux and no Windows signing environment was available. |
